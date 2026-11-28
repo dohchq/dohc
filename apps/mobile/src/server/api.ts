@@ -114,6 +114,14 @@ export type WorkspaceRole = "owner" | "admin" | "member";
 const isRole = (value: unknown): value is WorkspaceRole =>
   value === "owner" || value === "admin" || value === "member";
 
+export function selectOpenWorkspace(
+  workspaces: readonly AccountWorkspace[],
+  chosen: string | null,
+): AccountWorkspace | null {
+  const openable = workspaces.filter((entry) => entry.showOnPhone && entry.canOpen);
+  return openable.find((entry) => entry.workspaceId === chosen) ?? openable[0] ?? null;
+}
+
 /** One entry of the account's workspace list, as the server sends it and the phone saves it, or null. */
 export const accountWorkspace = (item: unknown): AccountWorkspace | null =>
   isFields(item) &&

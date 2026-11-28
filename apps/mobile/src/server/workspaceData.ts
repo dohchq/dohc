@@ -1,6 +1,6 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
 import type { AccountState, SignIn } from "./account";
-import { accountWorkspace, each, type WorkspaceRole } from "./api";
+import { accountWorkspace, each, selectOpenWorkspace, type WorkspaceRole } from "./api";
 import type { CacheRows, SavedView } from "./cacheRows";
 import { requestGenerations, ServerError, shownProblem, type ServerClient } from "./client";
 import { sleep } from "./deviceFlow";
@@ -371,8 +371,24 @@ export function createReadCache(files?: CacheRows): ReadCache {
       return done;
     },
     preload(signIn) {
-      for (const scope of [listScope(signIn), choiceScope(signIn)])
-        if (files) preloads.set(scope, { epoch, read: files.readList(scope) });
+      if (!files) return;
+      const expected = epoch;
+      const listKey = listScope(signIn);
+      const choiceKey = choiceScope(signIn);
+      const listRead = files.readList(listKey);
+      const choiceRead = files.readList(choiceKey);
+      preloads.set(listKey, { epoch: expected, read: listRead });
+      preloads.set(choiceKey, { epoch: expected, read: choiceRead });
+      void Promise.all([listRead, choiceRead])
+        .then(([foundList, foundChoice]) => {
+          if (epoch !== expected) return;
+          const workspaces = each(foundList, accountWorkspace);
+          if (!workspaces) return;
+          const chosen = typeof foundChoice === "string" ? foundChoice : null;
+          const selected = selectOpenWorkspace(workspaces, chosen);
+          if (selected) void cache.restore(cacheScope(signIn, selected.workspaceId, selected.role));
+        })
+        .catch(() => undefined);
     },
     savedList(signIn) {
       if (!files) return null;
@@ -463,6 +479,8 @@ export interface WorkspaceData {
   subscribe(view: View<unknown>, listener: () => void): () => void;
   /** Reads the view now, as a screen about to open it would, unless it shows a fresh value or a read is on its way. */
   prefetch(view: View<unknown>): void;
+  /** Reads views in the background on the sign-in's polite read-ahead lane, yielding to any tap. */
+  prefetchAhead(views: readonly View<unknown>[]): void;
   prefetchPages(paths: readonly string[], bucket?: string): void;
   retry(view: View<unknown>): void;
   /**
@@ -502,6 +520,7 @@ interface Entry {
   readonly listeners: Set<() => void>;
   stale: boolean;
   prefetched?: boolean;
+  ahead?: { promote(): boolean } | null;
   readonly reads: ReturnType<typeof requestGenerations>;
 }
 
@@ -653,20 +672,40 @@ export function createWorkspaceData(options: {
     if (cached) cache.set(scope, { ...cached, prefetched: undefined });
   }
 
-  function read(target: Entry, by: "person" | "feed" | AbortSignal = "person"): Promise<unknown> {
+  function read(
+    target: Entry,
+    by:
+      | "person"
+      | "feed"
+      | { readonly signal: AbortSignal; readonly promote: () => boolean } = "person",
+  ): Promise<unknown> {
+    target.ahead = null;
     const request = target.reads.next();
     const from = cursor;
     const unseen = target.prefetched || target.state.value === null;
     const ahead = typeof by === "string" ? null : by;
-    if (!ahead) set(target, { ...target.state, loading: true });
+    let isAhead = ahead !== null;
+    if (!isAhead) set(target, { ...target.state, loading: true });
     const reading = ahead
-      ? target.view.read(signIn.client, workspaceId, ahead)
+      ? target.view.read(signIn.client, workspaceId, ahead.signal)
       : lane.screen(
           () => target.view.read(signIn.client, workspaceId, everything.signal),
           by === "person",
         );
+    if (ahead) {
+      target.ahead = {
+        promote() {
+          if (!isAhead || !target.reads.isLatest(request) || !ahead.promote()) return false;
+          isAhead = false;
+          target.ahead = null;
+          set(target, { ...target.state, loading: true });
+          return true;
+        },
+      };
+    }
     return reading.then(
       (answer) => {
+        if (target.reads.isLatest(request)) target.ahead = null;
         if (!live() || !target.reads.isLatest(request)) return;
         target.stale = false;
         const previous = unseen ? null : target.state.value;
@@ -685,11 +724,12 @@ export function createWorkspaceData(options: {
         return value;
       },
       (error: unknown) => {
+        if (target.reads.isLatest(request)) target.ahead = null;
         // An answer that no longer counts says nothing, not even that the workspace has gone.
         if (!live() || !target.reads.isLatest(request)) return;
         if (isGone(error)) return gone();
         const problem = shownProblem(error);
-        if (problem === null || ahead) return;
+        if (problem === null || isAhead) return;
         set(target, {
           ...target.state,
           loading: false,
@@ -700,13 +740,46 @@ export function createWorkspaceData(options: {
     );
   }
 
-  let queued: { readonly path: string; readonly bucket: string }[] = [];
+  type QueuedAhead =
+    | { readonly kind: "page"; readonly path: string; readonly bucket: string }
+    | { readonly kind: "view"; readonly view: View<unknown> };
+  let queued: QueuedAhead[] = [];
   const tried = new Set<string>();
   const buckets = new Map<string, { kept: number; reading: number }>();
   function drain() {
     let next = 0;
     while (next < queued.length && running && live() && !restoring && lane.free()) {
-      const { path, bucket } = queued[next];
+      const item = queued[next]!;
+      if (item.kind === "view") {
+        queued.splice(next, 1);
+        const found = entries.get(item.view.id);
+        if (
+          found &&
+          (found.listeners.size > 0 ||
+            found.state.loading ||
+            found.ahead ||
+            (found.state.value !== null && !found.stale))
+        )
+          continue;
+        const target = found ?? entry(item.view);
+        void lane.ahead(everything.signal, async (signal, promote) => {
+          await read(target, { signal, promote });
+          if (
+            signal.aborted &&
+            !stopped &&
+            live() &&
+            target.listeners.size === 0 &&
+            !target.state.loading &&
+            (target.state.value === null || target.stale) &&
+            !queued.some(
+              (queuedItem) => queuedItem.kind === "view" && queuedItem.view.id === item.view.id,
+            )
+          )
+            queued.push(item);
+        });
+        continue;
+      }
+      const { path, bucket } = item;
       const allowance = buckets.get(bucket) ?? { kept: 0, reading: 0 };
       buckets.set(bucket, allowance);
       if (allowance.kept < PREFETCH_MAX && allowance.kept + allowance.reading >= PREFETCH_MAX) {
@@ -717,18 +790,31 @@ export function createWorkspaceData(options: {
       if (allowance.kept >= PREFETCH_MAX) continue;
       const view = views.page(path);
       const found = entries.get(view.id);
-      if (found && (found.listeners.size > 0 || found.state.value !== null || found.state.loading))
+      if (
+        found &&
+        (found.listeners.size > 0 ||
+          found.state.value !== null ||
+          found.state.loading ||
+          found.ahead)
+      )
         continue;
       tried.add(path);
       allowance.reading += 1;
       const target = found ?? entry(view);
-      void lane.ahead(everything.signal, async (signal) => {
-        const value = await read(target, signal);
+      void lane.ahead(everything.signal, async (signal, promote) => {
+        let promoted = false;
+        const value = await read(target, {
+          signal,
+          promote: () => {
+            promoted = promote();
+            return promoted;
+          },
+        });
         allowance.reading -= 1;
-        if ((value as PageRead | undefined)?.kind === "page") allowance.kept += 1;
+        if (!promoted && (value as PageRead | undefined)?.kind === "page") allowance.kept += 1;
         else if (signal.aborted) {
           tried.delete(path);
-          queued.push({ path, bucket });
+          queued.push(item);
         }
       });
     }
@@ -811,6 +897,7 @@ export function createWorkspaceData(options: {
 
   /** Drops the answer of a read in flight for a view no screen has open: it may predate the change. */
   function forget(target: Entry) {
+    target.ahead = null;
     target.reads.next();
     if (target.state.loading) set(target, { ...target.state, loading: false });
   }
@@ -863,13 +950,22 @@ export function createWorkspaceData(options: {
     subscribe(view, listener) {
       const target = entry(view);
       target.listeners.add(listener);
-      if (target.listeners.size === 1 && due(target)) void read(target);
+      if (target.listeners.size === 1 && !target.ahead?.promote() && due(target)) void read(target);
       shown(target);
       return () => void target.listeners.delete(listener);
     },
     prefetch(view) {
       const target = entry(view);
-      if (due(target)) void read(target);
+      if (!target.ahead?.promote() && due(target)) void read(target);
+    },
+    prefetchAhead(list) {
+      const seen = new Set(queued.map((item) => (item.kind === "view" ? item.view.id : null)));
+      for (const view of list) {
+        if (seen.has(view.id)) continue;
+        seen.add(view.id);
+        queued.push({ kind: "view", view });
+      }
+      drain();
     },
     prefetchPages(paths, bucket) {
       const fresh = new Map(
@@ -877,10 +973,17 @@ export function createWorkspaceData(options: {
           .filter((path) => !tried.has(path))
           .map((path) => [
             path,
-            { path, bucket: bucket ?? path.slice(0, path.lastIndexOf("/") + 1) },
+            {
+              kind: "page" as const,
+              path,
+              bucket: bucket ?? path.slice(0, path.lastIndexOf("/") + 1),
+            },
           ]),
       );
-      queued = [...fresh.values(), ...queued.filter((next) => !fresh.has(next.path))];
+      queued = [
+        ...fresh.values(),
+        ...queued.filter((next) => next.kind !== "page" || !fresh.has(next.path)),
+      ];
       drain();
     },
     retry(view) {

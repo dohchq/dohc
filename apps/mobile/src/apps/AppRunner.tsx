@@ -98,10 +98,11 @@ function AppView({
   serverOrigin: string;
   onStopped(): void;
 }) {
+  const theme = useTheme();
   const [allows] = useState(() => createNavigationRule(app.action));
   return (
     <WebView
-      style={{ flex: 1 }}
+      style={{ flex: 1, backgroundColor: theme.bg }}
       source={{
         uri: app.action,
         method: "POST",

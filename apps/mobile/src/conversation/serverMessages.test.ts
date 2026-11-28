@@ -88,6 +88,27 @@ describe("a conversation's runs", () => {
       continued(entry("m1", "automation", "Nova", 0), entry("m2", "human", "Nova", 1)),
     ).toEqual([false, false]);
   });
+
+  it("starts a new run and day divider across local midnight even within 5 minutes", () => {
+    const beforeMidnight = new Date(2026, 10, 4, 23, 59).getTime();
+    const afterMidnight = new Date(2026, 10, 5, 0, 1).getTime();
+    const items = conversationItems(
+      [
+        serverMessage({ ...entry("m1", "human", "Maya", 0), createdAtMs: beforeMidnight }, null, [
+          "#000000",
+        ]),
+        serverMessage({ ...entry("m2", "human", "Maya", 0), createdAtMs: afterMidnight }, null, [
+          "#000000",
+        ]),
+      ],
+      afterMidnight,
+    );
+    expect(items.filter((item) => item.type === "day")).toHaveLength(2);
+    expect(items.filter((item) => item.type === "message").map((item) => item.continued)).toEqual([
+      false,
+      false,
+    ]);
+  });
 });
 
 describe("mentionSegments", () => {

@@ -2,7 +2,10 @@ export const PREFETCH_AT_ONCE = 2;
 
 export interface ReadLane {
   screen<T>(read: () => Promise<T>, byPerson: boolean): Promise<T>;
-  ahead<T>(signal: AbortSignal, read: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  ahead<T>(
+    signal: AbortSignal,
+    read: (signal: AbortSignal, promote: () => boolean) => Promise<T>,
+  ): Promise<T>;
   free(): boolean;
   onFree(listener: () => void): () => void;
 }
@@ -41,9 +44,21 @@ export function readLane(signIn: object): ReadLane {
       signal.addEventListener("abort", abort);
       if (signal.aborted) abort();
       ahead.add(controller);
-      return start(() => read(controller.signal)).finally(() => {
-        signal.removeEventListener("abort", abort);
+      let promoted = false;
+      let finished = false;
+      const promote = () => {
+        if (finished || promoted || controller.signal.aborted) return false;
+        promoted = true;
         ahead.delete(controller);
+        screens += 1;
+        for (const other of ahead) other.abort();
+        return true;
+      };
+      return start(() => read(controller.signal, promote)).finally(() => {
+        finished = true;
+        signal.removeEventListener("abort", abort);
+        if (promoted) screens -= 1;
+        else ahead.delete(controller);
         settled();
       });
     },

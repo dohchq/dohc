@@ -15,6 +15,7 @@ interface WorkspacesState {
   readonly current: PhoneWorkspace | null;
   readonly workspaces: readonly PhoneWorkspace[];
   choose(workspaceId: string): void;
+  preload?(workspaceId: string): void;
   /**
    * Sample builds only: drops the workspace from this phone's list and opens the next one; returns how to put it back.
    * A signed-in build has Show on phone, in Settings, instead.
@@ -72,7 +73,7 @@ function ServerWorkspaces({ children }: { children: ReactNode }) {
  * outside the tabs, reads them here too.
  */
 export function useShownWorkspaces(): WorkspacesState {
-  const { workspaces: list, currentWorkspaceId, chooseWorkspace } = useAccount();
+  const { workspaces: list, currentWorkspaceId, chooseWorkspace, preloadWorkspace } = useAccount();
   const workspaces = useMemo(
     () =>
       list.status === "ready"
@@ -85,9 +86,10 @@ export function useShownWorkspaces(): WorkspacesState {
       current: workspaces.find((entry) => entry.id === currentWorkspaceId) ?? null,
       workspaces,
       choose: chooseWorkspace,
+      preload: preloadWorkspace,
       forget: null,
     }),
-    [workspaces, currentWorkspaceId, chooseWorkspace],
+    [workspaces, currentWorkspaceId, chooseWorkspace, preloadWorkspace],
   );
 }
 

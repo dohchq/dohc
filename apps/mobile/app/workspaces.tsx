@@ -16,7 +16,7 @@ import { signedInOnly } from "../src/sampleOnly";
 function WorkspacesSheet() {
   const theme = useTheme();
   const router = useRouter();
-  const { current, workspaces, choose } = useShownWorkspaces();
+  const { current, workspaces, choose, preload } = useShownWorkspaces();
   const { own, shared } = workspaceGroups(workspaces);
   const split = shared.length > 0;
   const open = (workspaceId: string) => {
@@ -39,12 +39,14 @@ function WorkspacesSheet() {
         rows={own}
         chosenId={chosenId}
         onChoose={open}
+        onPreload={preload}
       />
       <Group
         heading={split ? accountWords.sharedWithYou : null}
         rows={shared}
         chosenId={chosenId}
         onChoose={open}
+        onPreload={preload}
       />
     </ScrollView>
   );
@@ -55,11 +57,13 @@ function Group({
   rows,
   chosenId,
   onChoose,
+  onPreload,
 }: {
   heading: string | null;
   rows: readonly PhoneWorkspace[];
   chosenId: string | null;
   onChoose(workspaceId: string): void;
+  onPreload?(workspaceId: string): void;
 }) {
   const theme = useTheme();
   if (rows.length === 0) return null;
@@ -76,6 +80,7 @@ function Group({
           workspace={workspace}
           chosen={workspace.id === chosenId}
           onChoose={onChoose}
+          onPreload={onPreload}
         />
       ))}
     </View>
@@ -86,10 +91,12 @@ function WorkspaceRow({
   workspace,
   chosen,
   onChoose,
+  onPreload,
 }: {
   workspace: PhoneWorkspace;
   chosen: boolean;
   onChoose(workspaceId: string): void;
+  onPreload?(workspaceId: string): void;
 }) {
   const theme = useTheme();
   const disabled = workspace.canOpen === false;
@@ -102,6 +109,7 @@ function WorkspaceRow({
       }
       disabled={disabled}
       android_ripple={{ color: theme.panel2 }}
+      onPressIn={!chosen && onPreload ? () => onPreload(workspace.id) : undefined}
       onPress={() => onChoose(workspace.id)}
       style={({ pressed }) => [
         styles.row,

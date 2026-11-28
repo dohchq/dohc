@@ -1,5 +1,5 @@
 import type { SignIn } from "./account";
-import type { WorkspaceRole } from "./api";
+import { selectOpenWorkspace, type WorkspaceRole } from "./api";
 import {
   cacheScope,
   createWorkspaceData,
@@ -99,16 +99,12 @@ export function createOpenWorkspace(options: {
   function update() {
     if (stopped || state.choosing) return;
     const listed = list.state();
-    const openable =
-      listed.status === "ready"
-        ? listed.workspaces
-            .filter((entry) => entry.showOnPhone && entry.canOpen)
-            .map((entry) => entry.workspaceId)
-        : [];
-    const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
+    const selected =
+      listed.status === "ready" ? selectOpenWorkspace(listed.workspaces, chosen) : null;
+    const current = selected?.workspaceId ?? null;
     if (
       current !== state.currentWorkspaceId ||
-      (current !== null && state.data !== null && state.data.role !== roleNow(current))
+      (selected !== null && state.data !== null && state.data.role !== selected.role)
     )
       show(current);
   }

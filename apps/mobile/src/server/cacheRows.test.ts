@@ -1385,4 +1385,42 @@ describe("a launch", () => {
     await files.flush();
     expect(existsSync(disk.cache.path)).toBe(false);
   });
+
+  it("restores the chosen openable workspace's cached views during preload and drops it after clear", async () => {
+    const disk = keptDisk();
+    const first = launch(disk);
+    const saved = first.cache.savedList(SAVED)!;
+    saved.listed([
+      { ...entry("ws-a"), role: "owner" as const },
+      { ...entry("ws-b"), role: "owner" as const },
+    ]);
+    saved.chose("ws-b");
+    first.cache.set(cacheScope(SAVED, "ws-b"), {
+      view: views.files,
+      value: A_FILES,
+      cursor: "0.1.1",
+      stale: false,
+    });
+    first.cache.set(cacheScope(SAVED, "ws-a"), {
+      view: views.files,
+      value: A_FILES,
+      cursor: "0.1.1",
+      stale: false,
+    });
+    await first.files.flush();
+    disk.cache.crash();
+
+    const second = launch(disk);
+    second.cache.preload(SAVED);
+    await vi.waitFor(() =>
+      expect(second.cache.get(cacheScope(SAVED, "ws-b"), "files")?.value).toEqual(A_FILES),
+    );
+    expect(second.cache.entries(cacheScope(SAVED, "ws-a"))).toEqual([]);
+
+    const third = launch(disk);
+    third.cache.preload(SAVED);
+    third.cache.clear();
+    await third.files.flush();
+    expect(third.cache.entries(cacheScope(SAVED, "ws-b"))).toEqual([]);
+  });
 });

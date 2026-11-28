@@ -370,7 +370,7 @@ function Records({
         style={styles.screen}
         keyboardShouldPersistTaps="handled"
         data={view.rows}
-        keyExtractor={(record) => JSON.stringify(record.id)}
+        keyExtractor={recordRowKey}
         renderItem={({ item }) =>
           table ? (
             <RecordRow
@@ -421,6 +421,9 @@ function Records({
   );
 }
 
+const recordRowKey = (record: CollectionRecord) =>
+  typeof record.id === "number" ? `n:${record.id}` : `s:${record.id}`;
+
 /** A record's row: the field that names it, then up to two more that have a value. */
 const RecordRow = memo(function RecordRow(props: {
   record: CollectionRecord;
@@ -446,6 +449,7 @@ const RecordRow = memo(function RecordRow(props: {
   return (
     <Pressable
       onPress={() => props.onPress(record)}
+      android_ripple={ripple(theme)}
       style={({ pressed }) => [styles.row, pressed ? { backgroundColor: theme.panel2 } : null]}
       accessibilityRole="button"
       accessibilityLabel={[name, ...details].join(", ")}

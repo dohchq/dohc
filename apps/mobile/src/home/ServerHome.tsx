@@ -110,6 +110,18 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
     [router, toggle],
   );
   const { data, apps, collections } = useAccount();
+  const pressInRow = useCallback(
+    (row: HomeRow) => {
+      if (row.kind === "page") data?.prefetch(views.page(row.path));
+    },
+    [data],
+  );
+  const prefetchApp = useCallback(
+    (publicationId: string) => {
+      apps?.prefetchReview(publicationId);
+    },
+    [apps],
+  );
   const pagesShown = !collapsed.has("pages");
   const passed = useRef<{ data: unknown; paths: Set<string> }>({ data: null, paths: new Set() });
   useEffect(() => {
@@ -129,12 +141,16 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
     collections?.subscribe ?? nothing,
     useCallback(() => collections?.state() ?? NO_COLLECTIONS, [collections]),
   );
+  const groupedApps = useMemo(
+    () => (appsState.apps ? appGroups(appsState.apps) : null),
+    [appsState.apps],
+  );
   const focused = useIsFocused();
   useEffect(() => {
-    if (focused) void apps?.refresh();
+    if (focused) void apps?.check();
   }, [focused, apps]);
   useEffect(() => {
-    if (focused) void collections?.refresh();
+    if (focused) void collections?.check();
   }, [focused, collections]);
   const retryApps = useCallback(() => void apps?.refresh(), [apps]);
   const appsFailed = appWords.appsFailed(workspace);
@@ -181,10 +197,10 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
         ) : (
           <HoldRow />
         )
-      ) : appsState.apps.length === 0 ? (
+      ) : !groupedApps || groupedApps.length === 0 ? (
         <EmptyLine text={appWords.noApps} />
       ) : (
-        appGroups(appsState.apps).map(({ key, versions, approvedBefore }) => {
+        groupedApps.map(({ key, versions, approvedBefore }) => {
           const name = appName(versions[0]!);
           if (versions.length === 1)
             return (
@@ -194,6 +210,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
                 name={name}
                 depth={0}
                 approvedBefore={approvedBefore}
+                onPressIn={prefetchApp}
               />
             );
           return (
@@ -211,6 +228,7 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
                   name={name}
                   depth={1}
                   approvedBefore={approvedBefore}
+                  onPressIn={prefetchApp}
                 />
               ))}
             </Fragment>
@@ -229,7 +247,9 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
       ) : rows.pages.length === 0 ? (
         <EmptyLine text={workspaceWords.noPages} />
       ) : (
-        rows.pages.map((row) => <Row key={row.key} row={row} onPress={press} />)
+        rows.pages.map((row) => (
+          <Row key={row.key} row={row} onPress={press} onPressIn={pressInRow} />
+        ))
       )}
       {fileSection("sketches", workspaceWords.sketches, rows?.sketches)}
       {collectionsState.collections?.length ? (
@@ -246,9 +266,11 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
         : collectionsState.collections?.map((collection) => (
             <Pressable
               key={collection.datasetId}
+              onPressIn={() => void collections?.prefetch(collection.datasetId)}
               onPress={() =>
                 router.push({ pathname: "/collection", params: { id: collection.datasetId } })
               }
+              android_ripple={{ color: theme.panel2 }}
               style={({ pressed }) => [
                 styles.row,
                 styles.app,
@@ -273,8 +295,14 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
  * whether it is private to the owner or published. Each shows whether it waits for a review, and a Member app who made
  * it.
  */
-function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBefore: boolean }) {
-  const { app, name, depth, approvedBefore } = props;
+const AppRow = memo(function AppRow(props: {
+  app: PhoneApp;
+  name: string;
+  depth: number;
+  approvedBefore: boolean;
+  onPressIn(publicationId: string): void;
+}) {
+  const { app, name, depth, approvedBefore, onPressIn } = props;
   const theme = useTheme();
   const router = useRouter();
   const version = appWords.version(shortVersion(app));
@@ -292,7 +320,9 @@ function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBef
   const detail = state ?? "";
   return (
     <Pressable
+      onPressIn={() => onPressIn(app.publicationId)}
       onPress={() => router.push({ pathname: "/app-review", params: { id: app.publicationId } })}
+      android_ripple={{ color: theme.panel2 }}
       style={({ pressed }) => [
         styles.row,
         styles.app,
@@ -330,9 +360,17 @@ function AppRow(props: { app: PhoneApp; name: string; depth: number; approvedBef
       {app.approved ? <ShieldCheck size={16} color={theme.accent} strokeWidth={2} /> : null}
     </Pressable>
   );
-}
+});
 
-const Row = memo(function Row({ row, onPress }: { row: HomeRow; onPress(row: HomeRow): void }) {
+const Row = memo(function Row({
+  row,
+  onPress,
+  onPressIn,
+}: {
+  row: HomeRow;
+  onPress(row: HomeRow): void;
+  onPressIn?(row: HomeRow): void;
+}) {
   const theme = useTheme();
   const listed = row.kind === "sketch" || row.kind === "other";
   const depth = row.kind === "folder" || row.kind === "page" ? row.depth : 0;
@@ -383,7 +421,9 @@ const Row = memo(function Row({ row, onPress }: { row: HomeRow; onPress(row: Hom
     );
   return (
     <Pressable
+      onPressIn={onPressIn ? () => onPressIn(row) : undefined}
       onPress={() => onPress(row)}
+      android_ripple={{ color: theme.panel2 }}
       style={({ pressed }) => [style, pressed ? { backgroundColor: theme.panel2 } : null]}
       accessibilityRole="button"
       accessibilityLabel={row.name}
