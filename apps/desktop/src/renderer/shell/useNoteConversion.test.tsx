@@ -50,27 +50,42 @@ function held() {
   return { promise, ...settle };
 }
 
-function mount(workspaceId = "ws-a") {
+function mount(workspaceId = "ws-a", ready = true) {
   const report = vi.fn();
   const success = vi.fn();
   const clear = vi.fn();
   let latest!: NoteConversion;
-  function Probe(props: { workspaceId: string }) {
-    latest = useNoteConversion({ workspaceId: props.workspaceId, report, success, clear });
+  function Probe(props: { workspaceId: string; ready: boolean }) {
+    latest = useNoteConversion({
+      workspaceId: props.workspaceId,
+      ready: props.ready,
+      report,
+      success,
+      clear,
+    });
     return null;
   }
-  const shown = (id: string) => (
-    <WorkspaceSessionProvider workspaceId={id}>
-      <Probe workspaceId={id} />
+  let shownId = workspaceId;
+  let shownReady = ready;
+  const shown = () => (
+    <WorkspaceSessionProvider workspaceId={shownId}>
+      <Probe workspaceId={shownId} ready={shownReady} />
     </WorkspaceSessionProvider>
   );
-  const view = render(shown(workspaceId));
+  const view = render(shown());
   return {
     report,
     success,
     clear,
     conversion: () => latest,
-    switchTo: (next: string) => view.rerender(shown(next)),
+    switchTo: (next: string) => {
+      shownId = next;
+      view.rerender(shown());
+    },
+    opened: () => {
+      shownReady = true;
+      view.rerender(shown());
+    },
   };
 }
 
@@ -374,6 +389,25 @@ describe("whether Settings offers Convert notes", () => {
     await waitFor(() => expect(shell.conversion().offer.value).toBe(true));
     expect(offered).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
     expect(shell.conversion().offer.failed).toBe(false);
+  });
+
+  it("waits for the workspace to open, with no notice, then asks main", async () => {
+    const offered = vi
+      .fn<DohcDesktopBridge["readNoteConversionOffered"]>()
+      .mockRejectedValue(new Error("Open this workspace to see whether it can convert its notes."));
+    install(vi.fn(), offered);
+    const shell = mount("ws-a", false);
+    await act(async () => undefined);
+
+    expect(offered).not.toHaveBeenCalled();
+    expect(shell.report).not.toHaveBeenCalled();
+    expect(shell.conversion().offer).toMatchObject({ value: undefined, failed: false });
+
+    offered.mockResolvedValue({ offered: true });
+    shell.opened();
+    await waitFor(() => expect(shell.conversion().offer.value).toBe(true));
+    expect(offered).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
+    expect(shell.report).not.toHaveBeenCalled();
   });
 
   it("files a notice when main could not say, and its Try again asks again and clears it", async () => {
