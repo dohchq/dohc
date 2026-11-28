@@ -31,6 +31,12 @@ import { untilAborted } from "./namedLiveFrameHost";
 import { parseChatContext, readWakeChanges, runAccountChatContext } from "./accountTalkContext";
 import { isPhoneAppOperation, type PhoneApps } from "./phoneApps";
 import { isPhoneCollectionOperation, type PhoneCollections } from "./phoneCollections";
+import {
+  isPhoneDocumentCollectionReadOperation,
+  isPhoneDocumentCollectionWriteOperation,
+  runPhoneDocumentCollectionRead,
+  runPhoneDocumentCollectionWrite,
+} from "./phoneDocumentCollections";
 import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import type { ChatWakeWaits } from "./chatWakeRoutes";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
@@ -189,8 +195,10 @@ export function createAccountOperationRoute(options: {
       options.phoneCollections !== undefined && isPhoneCollectionOperation(route.operation);
     const sketch = isPhoneSketchOperation(route.operation);
     const fileWrite = isAccountFileWriteOperation(route.operation);
+    const docCollectionRead = isPhoneDocumentCollectionReadOperation(route.operation);
+    const docCollectionWrite = isPhoneDocumentCollectionWriteOperation(route.operation);
     // The feeds, the app and Collection operations, and a page open read only the relay's own tables, its dataset host
-    // and its live host; owner sketch and file-write ops check owner reach first so Members always get 404.
+    // and its live host; owner sketch, Document Collection, and file-write ops check owner reach first so Members always get 404.
     if (
       !feed &&
       !wakeFeed &&
@@ -199,6 +207,8 @@ export function createAccountOperationRoute(options: {
       !page &&
       !sketch &&
       !fileWrite &&
+      !docCollectionRead &&
+      !docCollectionWrite &&
       options.copies() === undefined
     )
       throw copiesUnavailable();
@@ -226,6 +236,8 @@ export function createAccountOperationRoute(options: {
         wakeFeed ||
         app ||
         collection ||
+        docCollectionRead ||
+        docCollectionWrite ||
         fileWrite ||
         write ||
         sketch ||
@@ -239,7 +251,8 @@ export function createAccountOperationRoute(options: {
       owner === null
     )
       throw notFound();
-    if ((sketch || fileWrite) && options.copies() === undefined) throw copiesUnavailable();
+    if ((sketch || fileWrite || docCollectionWrite) && options.copies() === undefined)
+      throw copiesUnavailable();
     if (caller.userId !== owner)
       await options.refreshAccountEmail?.(caller.userId, readSignal ?? request.signal);
     const member = memberOf(caller.userId);
@@ -347,6 +360,14 @@ export function createAccountOperationRoute(options: {
         authorize,
         signal: request.signal,
       });
+    if (isPhoneDocumentCollectionReadOperation(route.operation)) {
+      const { result, cursor } = runPhoneDocumentCollectionRead(storage, {
+        workspaceId: route.workspaceId,
+        operation: route.operation,
+        args,
+      });
+      return jsonResponse({ ok: true, result, cursor });
+    }
     // A page open reads only the relay's own tables and the live host.
     if (page) {
       const pages = options.phonePages?.();
@@ -398,6 +419,20 @@ export function createAccountOperationRoute(options: {
         {
           owner,
           workspaceId: route.workspaceId,
+          operation: route.operation,
+          args,
+          visitor,
+          authorize,
+        },
+      );
+      return jsonResponse({ ok: true, result, cursor });
+    }
+    if (isPhoneDocumentCollectionWriteOperation(route.operation)) {
+      const { result, cursor } = await runPhoneDocumentCollectionWrite(
+        { storage, copies },
+        {
+          workspaceId: route.workspaceId,
+          owner,
           operation: route.operation,
           args,
           visitor,

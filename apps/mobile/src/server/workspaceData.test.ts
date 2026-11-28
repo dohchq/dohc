@@ -1778,4 +1778,55 @@ describe("prefetching pages", () => {
     );
     expect(updates).toHaveBeenCalled();
   });
+
+  it("views.documentCollections reads for owner, invalidates on files change, and skips network for joined members", async () => {
+    const server = testServer();
+    let reads = 0;
+    server.on("POST", "/sync/ws-doccol/ops/documentCollections", () => {
+      reads += 1;
+      return ops(
+        {
+          ok: true,
+          collections: [
+            {
+              path: reads === 1 ? "Tasks" : "Projects",
+              name: reads === 1 ? "Tasks" : "Projects",
+              description: null,
+              status: "valid",
+              fields: [{ name: "Name", type: "text" }],
+            },
+          ],
+        },
+        `0.1.${reads}`,
+      );
+    });
+    server.on(
+      "GET",
+      feedPath("ws-doccol", "0.1.1"),
+      feed({ cursor: "0.1.2", changed: { files: ["obj-1"] } }),
+    );
+    server.on("GET", feedPath("ws-doccol", "0.1.2"), held);
+    const { data } = open(server, "ws-doccol");
+    data.subscribe(views.documentCollections, () => {});
+    await vi.waitFor(() =>
+      expect(data.state(views.documentCollections).value?.map((c) => c.path)).toEqual(["Projects"]),
+    );
+    expect(reads).toBe(2);
+
+    const joinedServer = testServer();
+    joinedServer.on("POST", "/sync/ws-joined/ops/documentCollections", { status: 404, body: {} });
+    const gone = vi.fn();
+    const joined = createWorkspaceData({
+      signIn: signInTo(joinedServer),
+      workspaceId: "ws-joined",
+      role: "member",
+      cache: createReadCache(),
+      onGone: gone,
+    });
+    joined.resume();
+    joined.subscribe(views.documentCollections, () => {});
+    await settled();
+    expect(count(joinedServer, "/sync/ws-joined/ops/documentCollections")).toBe(0);
+    expect(gone).not.toHaveBeenCalled();
+  });
 });

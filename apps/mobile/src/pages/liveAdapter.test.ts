@@ -8,7 +8,13 @@ import {
   type LiveFrameBegin,
 } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
+import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import {
+  createLiveMarkdownJournalValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { createLiveAdapter } from "../../editor/liveAdapter";
@@ -337,5 +343,36 @@ describe("the page's live connection", () => {
     await settled();
     expect(t.provider().state().status).toBe("disconnected");
     expect(t.sentOn(2).at(-1)).toMatchObject({ type: "close" });
+  });
+
+  it("submits live patchFrontmatter updates passing live journal validation and fires observeDeep on remote updates", async () => {
+    const t = page();
+    const app = t.connect();
+    const base = markdownToYDoc("---\nStatus: Todo\n---\nbody\n");
+    await app.sync(base);
+
+    const observed: Array<Record<string, unknown>> = [];
+    const frontmatter = t.provider().doc.getMap("frontmatter");
+    frontmatter.observeDeep(() => observed.push(frontmatterMapValues(frontmatter)));
+
+    const checkpoint = Y.encodeStateAsUpdate(t.provider().doc);
+    patchFrontmatter(t.provider().doc, new Map<string, unknown>([["Status", "Done"]]));
+    await vi.waitFor(() => expect(app.submissions.length).toBe(1));
+    expect(observed.at(-1)).toMatchObject({ Status: "Done" });
+
+    const validate = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY);
+    const verdict = validate({
+      document: {
+        workspaceId: binding.workspaceId,
+        mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      },
+      checkpoint,
+      suffix: [],
+      candidate: app.submissions[0]!.bytes,
+      currentPath: binding.currentPath,
+    });
+    expect(verdict.kind).toBe("accepted");
   });
 });

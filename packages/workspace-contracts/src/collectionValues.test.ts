@@ -15,7 +15,12 @@ import {
   collectionVersionError,
   FIELD_VALUE_REASON_CODES,
 } from "./collection";
-import { isRecordId, parseCollectionSchema, validateFieldValue } from "./collectionValues";
+import {
+  isRecordId,
+  parseCollectionSchema,
+  serializeCollectionSchema,
+  validateFieldValue,
+} from "./collectionValues";
 
 interface SchemaVector {
   name: string;
@@ -279,5 +284,60 @@ describe("Field value contract vectors", () => {
 describe("Record id contract vectors", () => {
   it.each(recordIdVectors)("classifies $value", ({ value, valid }) => {
     expect(isRecordId(value)).toBe(valid);
+  });
+});
+
+describe("serializeCollectionSchema", () => {
+  it("round-trips starter and typed schemas through parseCollectionSchema", () => {
+    const yaml = serializeCollectionSchema({
+      name: "Tasks",
+      description: "Team tracker",
+      fields: [
+        { name: "Name", type: "text" },
+        {
+          name: "Status",
+          type: "select",
+          options: ["Todo", "Done"],
+          colors: { Done: "gray" },
+        },
+        { name: "Project", type: "relation", collection: "Projects", many: false },
+      ],
+      views: [
+        {
+          name: "All",
+          kind: "table",
+          groupBy: "Status",
+          sort: [],
+          visibleFields: null,
+          dateField: null,
+        },
+      ],
+    });
+    const parsed = parseCollectionSchema(yaml);
+    expect(parsed.status).toBe("valid");
+    expect(parsed.schema).toEqual({
+      name: "Tasks",
+      description: "Team tracker",
+      fields: [
+        { name: "Name", type: "text" },
+        {
+          name: "Status",
+          type: "select",
+          options: ["Todo", "Done"],
+          colors: { Done: "gray" },
+        },
+        { name: "Project", type: "relation", collection: "Projects", many: false },
+      ],
+      views: [
+        {
+          name: "All",
+          kind: "table",
+          groupBy: "Status",
+          sort: [],
+          visibleFields: null,
+          dateField: null,
+        },
+      ],
+    });
   });
 });

@@ -84,23 +84,25 @@ const refuse = (refusal: AccountFileWriteRefusal, reason: string): AccountFileWr
 const COLLECTION_MARKER_BATCH_TARGETS = 64;
 const COLLECTION_MARKER_BATCH_BYTES = 32 * 1024;
 
-function collectionMarkerPaths(path: string): string[] {
+function collectionMarkerPaths(path: string, allowDocumentCollection = false): string[] {
   const segments = path.split("/");
   const markers: string[] = [];
   for (let i = 0; i < segments.length; i += 1) {
     const prefix = segments.slice(0, i).join("/");
     markers.push(prefix ? `${prefix}/dataset.json` : "dataset.json");
-    markers.push(prefix ? `${prefix}/collection.yaml` : "collection.yaml");
+    if (!allowDocumentCollection)
+      markers.push(prefix ? `${prefix}/collection.yaml` : "collection.yaml");
   }
   return markers;
 }
 
-async function assertOutsideCollection(
+export async function assertOutsideCollection(
   files: VersionedLiveAdapter,
   workspaceId: string,
   path: string,
+  allowDocumentCollection = false,
 ): Promise<void> {
-  const markers = collectionMarkerPaths(path);
+  const markers = collectionMarkerPaths(path, allowDocumentCollection);
   let batch: Array<{ path: string }> = [];
   let batchBytes = 0;
   const flush = async () => {
@@ -124,7 +126,7 @@ async function assertOutsideCollection(
   await flush();
 }
 
-function parseFields(args: unknown, allowed: readonly string[]): Record<string, unknown> {
+export function parseFields(args: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (
     !args ||
     typeof args !== "object" ||
@@ -134,12 +136,39 @@ function parseFields(args: unknown, allowed: readonly string[]): Record<string, 
     throw badRequest("Invalid file operation arguments.");
   return args as Record<string, unknown>;
 }
-const parseRequestId = (v: unknown) => {
+export async function seedRichDocLineage(
+  storage: SyncRelayStorage,
+  replica: {
+    readonly client: Parameters<typeof openEngineYdocProviderSession>[0]["transport"];
+    readonly workspace: string;
+  },
+  input: { readonly workspaceId: string; readonly path: string; readonly objectId: string },
+): Promise<void> {
+  if (storage.mainLiveLineageExists({ workspaceId: input.workspaceId, objectId: input.objectId }))
+    return;
+  const session = await openEngineYdocProviderSession({
+    transport: replica.client,
+    workspace: replica.workspace,
+    versionId: "main",
+    path: input.path,
+    expectedObjectId: input.objectId,
+    contentKind: "richdoc",
+    seedAbsentLineage: true,
+    onRemoteUpdate: () => undefined,
+  });
+  try {
+    await session.close({ settle: false });
+  } catch (error) {
+    await session.evict().catch(() => undefined);
+    throw error;
+  }
+}
+export const parseRequestId = (v: unknown) => {
   if (typeof v !== "string" || !REQUEST_ID_RE.test(v) || v.includes(":undo:"))
     throw badRequest("A valid requestId is required.");
   return v;
 };
-const parseObjectId = (v: unknown) => {
+export const parseObjectId = (v: unknown) => {
   if (typeof v !== "string" || !v.length || v.length > 128)
     throw badRequest("A valid expectedObjectId is required.");
   return v;
@@ -412,24 +441,11 @@ export async function runAccountFileWrite(
             return refuse("path-exists", "A file with this name already exists.");
           objectId = existing.objectId;
         }
-        if (!deps.storage.mainLiveLineageExists({ workspaceId, objectId })) {
-          const session = await openEngineYdocProviderSession({
-            transport: replica.client,
-            workspace: replica.workspace,
-            versionId: "main",
-            path: parsed.path,
-            expectedObjectId: objectId,
-            contentKind: "richdoc",
-            seedAbsentLineage: true,
-            onRemoteUpdate: () => undefined,
-          });
-          try {
-            await session.close({ settle: false });
-          } catch (error) {
-            await session.evict().catch(() => undefined);
-            throw error;
-          }
-        }
+        await seedRichDocLineage(deps.storage, replica, {
+          workspaceId,
+          path: parsed.path,
+          objectId,
+        });
         await replica.sync(signal);
         if (
           objectAt(parsed.path) !== objectId ||
@@ -446,7 +462,7 @@ export async function runAccountFileWrite(
       const caseOnly = dstPath !== null && srcPath.toLowerCase() === dstPath.toLowerCase();
       const rich = liveDocumentKindForPath(srcPath) === "richdoc";
       const resolve = async () => {
-        await assertOutsideCollection(files, workspaceId, srcPath);
+        await assertOutsideCollection(files, workspaceId, srcPath, !isRename && rich);
         const targets = dstPath ? [{ path: srcPath }, { path: dstPath }] : [{ path: srcPath }];
         const { versionId, results } = await files.resolveFiles({ workspaceId, targets });
         return { versionId, from: results[0], to: dstPath ? results[1] : undefined };

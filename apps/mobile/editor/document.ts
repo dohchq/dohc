@@ -1,11 +1,17 @@
 // A page in the app's web view: icon, title, properties and body in one scroll, so the caret stays above the
 // keyboard without the app coordinating two scroll views. The app passes the page in `window.__dohcPage`.
+import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
+import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
+import type * as Y from "yjs";
 import { post } from "./bridge";
 import { opensFormat, refuseFormat } from "./format";
 import { followLive } from "./live";
 import { createEditorToolbar, type EditorToolbar } from "./toolbar";
+
+const HIDDEN_PROPERTY_KEYS = new Set(["id", "title", "icon"]);
 
 export interface PageProperty {
   readonly name: string;
@@ -16,6 +22,10 @@ export interface PageConfig {
   readonly title: string;
   readonly icon?: string;
   readonly properties: readonly PageProperty[];
+  readonly propertyFields?: readonly FieldDefinition[];
+  readonly propertiesEditable?: boolean;
+  readonly relationLabels?: Readonly<Record<string, string>>;
+  readonly emptyPropertyLabel?: string;
   readonly markdown: string;
   /** Over the 2 MiB limit: the start shows as plain text, read-only. */
   readonly large: boolean;
@@ -28,6 +38,46 @@ export interface PageConfig {
   readonly touchSize?: number;
   /** Design review only: type a sentence and report keystroke-to-paint. */
   readonly autotype?: boolean;
+}
+
+function formatProperty(
+  value: unknown,
+  field: FieldDefinition | undefined,
+  labels: Readonly<Record<string, string>>,
+  emptyLabel: string,
+): string {
+  if (value === null || value === undefined || value === "") return emptyLabel;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) {
+    if (!value.length) return emptyLabel;
+    return value
+      .map((item) =>
+        field?.type === "relation" && typeof item === "string"
+          ? (labels[item] ?? item)
+          : String(item),
+      )
+      .join(", ");
+  }
+  if (field?.type === "relation" && typeof value === "string") return labels[value] ?? value;
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function isEditablePropertyValue(value: unknown, field: FieldDefinition | undefined): boolean {
+  if (field?.type === "button") return false;
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  )
+    return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value))
+    return value.every(
+      (x) => typeof x === "string" || typeof x === "number" || typeof x === "boolean",
+    );
+  return false;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -55,6 +105,7 @@ export function mountDocument(page: PageConfig) {
   // A large file shows only its start as text, as the desktop's truncated view does: no title or properties.
   if (page.icon && !page.large) root.append(element("div", "icon", page.icon));
   if (!page.large) root.append(element("h1", "title", page.title));
+  let propertyList: HTMLDListElement | null = null;
   if (page.properties.length > 0 && !page.large) {
     const list = element("dl", "properties");
     for (const property of page.properties) {
@@ -63,14 +114,99 @@ export function mountDocument(page: PageConfig) {
       list.append(row);
     }
     root.append(list);
+  } else if (!page.large) {
+    propertyList = element("dl", "properties");
+    propertyList.hidden = true;
+    root.append(propertyList);
   }
   const body = element("div", "body");
   root.append(body);
   let editable = page.editable;
+  let propertiesEditable = page.propertiesEditable === true;
+  let propertyFields: readonly FieldDefinition[] = page.propertyFields ?? [];
+  let relationLabels: Readonly<Record<string, string>> = page.relationLabels ?? {};
+  const emptyLabel = page.emptyPropertyLabel ?? "—";
+  let activeDoc: Y.Doc | null = null;
+  let activeLive = false;
   let typed: readonly number[] = [];
   const endEditing = () => {
     (document.activeElement as HTMLElement | null)?.blur();
     window.getSelection()?.removeAllRanges();
+  };
+  const renderProperties = (doc: Y.Doc | null) => {
+    if (!propertyList) return;
+    if (!doc) {
+      propertyList.replaceChildren();
+      propertyList.hidden = true;
+      return;
+    }
+    const values = frontmatterMapValues(doc.getMap("frontmatter"));
+    const locked = frontmatterEditsRefused(doc);
+    const seen = new Set<string>();
+    const entries: Array<{ key: string; value: unknown; field: FieldDefinition | undefined }> = [];
+    for (const field of propertyFields) {
+      if (
+        field.type === "button" ||
+        HIDDEN_PROPERTY_KEYS.has(field.name.toLowerCase()) ||
+        seen.has(field.name)
+      )
+        continue;
+      seen.add(field.name);
+      entries.push({
+        key: field.name,
+        value: Object.hasOwn(values, field.name) ? values[field.name] : null,
+        field,
+      });
+    }
+    for (const [key, value] of Object.entries(values)) {
+      if (HIDDEN_PROPERTY_KEYS.has(key.toLowerCase()) || seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ key, value, field: undefined });
+    }
+    propertyList.replaceChildren();
+    propertyList.hidden = entries.length === 0;
+    for (const entry of entries) {
+      const canTap =
+        propertiesEditable && !locked && isEditablePropertyValue(entry.value, entry.field);
+      const shown = formatProperty(entry.value, entry.field, relationLabels, emptyLabel);
+      const row = element("div", canTap ? "property opens" : "property");
+      row.append(element("dt", "", entry.key), element("dd", "", shown));
+      if (canTap) {
+        row.setAttribute("role", "button");
+        row.tabIndex = 0;
+        row.setAttribute("aria-label", `${entry.key}: ${shown}`);
+        const tap = () => {
+          endEditing();
+          post("propertyTap", { key: entry.key, value: entry.value ?? null, live: activeLive });
+        };
+        row.addEventListener("click", tap);
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            tap();
+          }
+        });
+      }
+      propertyList.append(row);
+    }
+  };
+  (
+    window as Window & { __dohcSetPropertiesEditable?: (v: boolean) => void }
+  ).__dohcSetPropertiesEditable = (value) => {
+    propertiesEditable = value;
+    renderProperties(activeDoc);
+  };
+  (
+    window as Window & {
+      __dohcSetPropertyContext?: (ctx: {
+        fields?: readonly FieldDefinition[];
+        relationLabels?: Readonly<Record<string, string>>;
+      }) => void;
+    }
+  ).__dohcSetPropertyContext = (ctx) => {
+    if (ctx.fields !== undefined) propertyFields = ctx.fields;
+    if (ctx.relationLabels !== undefined) relationLabels = ctx.relationLabels;
+    renderProperties(activeDoc);
   };
   // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
   const samples: number[] = [];
@@ -100,10 +236,16 @@ export function mountDocument(page: PageConfig) {
     body.replaceChildren();
     const doc = page.large ? null : markdownToYDoc(markdown);
     if (doc === null) {
+      activeDoc = null;
+      activeLive = false;
+      renderProperties(null);
       body.append(element("pre", "source", markdown));
       return;
     }
     if (!opensFormat(doc)) return refuseFormat();
+    activeDoc = doc;
+    activeLive = false;
+    renderProperties(doc);
     // Copy as Markdown copies the page as it is now, with the person's edits.
     (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
       post("markdown", { markdown: yDocToMarkdown(doc) });
@@ -144,6 +286,12 @@ export function mountDocument(page: PageConfig) {
         label: page.title,
         endEditing,
         toolbar,
+        onPropertiesDoc(doc) {
+          activeDoc = doc;
+          activeLive = doc !== null;
+          renderProperties(doc);
+        },
+        getPropertyField: (key) => propertyFields.find((f) => f.name === key),
       });
     // Design review only: type a sentence at the end of the page, then report keystroke-to-paint.
     if (page.autotype) autotype(body, samples);

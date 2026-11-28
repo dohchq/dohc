@@ -6,6 +6,10 @@ import { requestGenerations, ServerError, shownProblem, type ServerClient } from
 import { sleep } from "./deviceFlow";
 import { appOperations, type PhoneApp } from "./phoneApps";
 import { collectionOperations, type PhoneCollection } from "./phoneCollections";
+import {
+  readDocumentCollections,
+  type DocumentCollectionSummary,
+} from "./phoneDocumentCollections";
 import { readLane } from "./readLane";
 import {
   earlierCursor,
@@ -85,6 +89,7 @@ export interface Known {
 
 export interface View<T> {
   readonly id: string;
+  readonly ownerOnly?: true;
   read(
     client: ServerClient,
     workspaceId: string,
@@ -126,6 +131,12 @@ export const views = {
         .then((value) => ({ value, cursor: null })),
     affectedBy: () => false,
   } satisfies View<readonly PhoneCollection[]>,
+  documentCollections: {
+    id: "documentCollections",
+    ownerOnly: true,
+    read: readDocumentCollections,
+    affectedBy: (changes) => changes.files !== undefined,
+  } satisfies View<readonly DocumentCollectionSummary[]>,
 
   /** A chat's stream: a change to one of its threads, or to a thread the store can't place in a chat yet. */
   stream(groupId: string): View<GroupStream | MissingChat> {
@@ -226,6 +237,7 @@ export function viewOf(id: string): View<unknown> | null {
   if (id === views.chats.id) return views.chats;
   if (id === views.apps.id) return views.apps;
   if (id === views.collections.id) return views.collections;
+  if (id === views.documentCollections.id) return views.documentCollections;
   const [kind, ...rest] = id.split(":");
   const key = rest.join(":");
   if (key === "") return null;
@@ -448,7 +460,9 @@ export function createReadCache(files?: CacheRows): ReadCache {
 }
 
 const isListing = (view: View<unknown>) =>
-  [views.files, views.chats, views.apps, views.collections].some((each) => each.id === view.id);
+  [views.files, views.chats, views.apps, views.collections, views.documentCollections].some(
+    (each) => each.id === view.id,
+  );
 
 export function cachedList<T>(
   cache: ReadCache,
@@ -613,7 +627,12 @@ export function createWorkspaceData(options: {
       // What the cache holds now, so a drop or clear since the file was read wins here too.
       seed(cache.entries(scope));
       for (const target of entries.values()) {
-        if (target.listeners.size > 0 && live() && (target.state.value === null || target.stale))
+        if (
+          target.listeners.size > 0 &&
+          live() &&
+          !(target.view.ownerOnly && role !== "owner") &&
+          (target.state.value === null || target.stale)
+        )
           void read(target);
         else if (target.state.loading) set(target, { ...target.state, loading: false });
       }
@@ -660,7 +679,10 @@ export function createWorkspaceData(options: {
   }
 
   const due = (target: Entry) =>
-    live() && !target.state.loading && (target.state.value === null || target.stale);
+    live() &&
+    !(target.view.ownerOnly && role !== "owner") &&
+    !target.state.loading &&
+    (target.state.value === null || target.stale);
 
   function set(target: Entry, state: ViewState<unknown>) {
     target.state = state;
@@ -681,6 +703,7 @@ export function createWorkspaceData(options: {
       | "feed"
       | { readonly signal: AbortSignal; readonly promote: () => boolean } = "person",
   ): Promise<unknown> {
+    if (target.view.ownerOnly && role !== "owner") return Promise.resolve();
     target.ahead = null;
     const request = target.reads.next();
     const from = cursor;

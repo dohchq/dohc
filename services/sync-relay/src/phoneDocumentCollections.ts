@@ -1,0 +1,754 @@
+import { posix } from "node:path";
+import * as Y from "yjs";
+import {
+  prepareCollectionRecord,
+  setCollectionRecordFields,
+} from "@dohc/automation-executor/collection-record-edits";
+import { derivedRecordId } from "@dohc/automation-executor/record-ids";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
+import { isFolderMarkerPath } from "@dohc/security-contract/access-rules";
+import {
+  APP_COLLECTION_MAX_RECORD_BYTES,
+  APP_COLLECTION_MAX_SCHEMA_BYTES,
+} from "@dohc/security-contract/app-collection-checks";
+import {
+  COLLECTION_SCHEMA_FILENAME,
+  RECORD_ID_FRONTMATTER_KEY,
+  type CollectionSchema,
+  type FieldDefinition,
+} from "@dohc/workspace-contracts/collection";
+import {
+  isNormalizedRelativePath,
+  isRecordId,
+  parseCollectionRecordFields,
+  parseCollectionSchema,
+  serializeCollectionSchema,
+  validateFieldValue,
+} from "@dohc/workspace-contracts/collection-values";
+import {
+  workspaceDestinationError,
+  workspaceNameError,
+} from "@dohc/workspace-contracts/workspace-paths";
+import { validateUserWritePath } from "@dohc/workspace-core";
+import {
+  DaemonRefusalError,
+  VersionedLiveAdapter,
+  type WriteAuthor,
+} from "@dohc/workspace-engine-client";
+import {
+  FRONTMATTER_EDIT_REFUSED_MESSAGE,
+  writeMarkdownFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter";
+import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
+import {
+  assertOutsideCollection,
+  parseFields,
+  parseObjectId,
+  parseRequestId,
+  seedRichDocLineage,
+  validateAllowedFileWritePath,
+} from "./accountFileWrites";
+import { currentAccountFeedCursor, hiddenFile } from "./accountFeed";
+import type { AutomationReplica } from "./automationReplicas";
+import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
+import { badRequest, RelayError } from "./errors";
+import { liveEditors } from "./liveEditors";
+import { untilAborted } from "./namedLiveFrameHost";
+import type { CopyVisitor, ServerCopies } from "./serverCopies";
+import type { SyncRelayStorage } from "./storage";
+import {
+  readBoundedRelayBlob,
+  scanCollectionMarkdownFiles,
+  type ScannedCollectionMarkdownFile,
+} from "./storage/appCollections";
+import type { StorageContext } from "./storage/context";
+
+export type PhoneDocumentCollectionReadOperation =
+  | "documentCollections"
+  | "documentCollectionRecords";
+export type PhoneDocumentCollectionWriteOperation =
+  | "createDocumentCollection"
+  | "createDocumentRecord"
+  | "editDocumentRecordFields";
+export const isPhoneDocumentCollectionReadOperation = (
+  name: string,
+): name is PhoneDocumentCollectionReadOperation =>
+  name === "documentCollections" || name === "documentCollectionRecords";
+export const isPhoneDocumentCollectionWriteOperation = (
+  name: string,
+): name is PhoneDocumentCollectionWriteOperation =>
+  name === "createDocumentCollection" ||
+  name === "createDocumentRecord" ||
+  name === "editDocumentRecordFields";
+
+export const PHONE_DOC_COLLECTION_PAGE = 50;
+export const PHONE_DOC_COLLECTION_MAX_SCAN = 200;
+const MAX_COLLECTIONS = 200;
+const MAX_FIELDS = 32;
+const MAX_LIVE_OVERLAY_BYTES = 2 * 1024 * 1024;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+const FRONTMATTER_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/;
+const parentDir = (path: string) =>
+  path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+
+function validateCollectionFolder(value: unknown, checkDest = false): string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    Buffer.byteLength(value, "utf8") > 512 ||
+    CONTROL_CHARS.test(value) ||
+    !isNormalizedRelativePath(value) ||
+    value.split("/").some((s) => s.startsWith("."))
+  )
+    throw badRequest("Invalid Collection folder path.");
+  const schemaPath = `${value}/${COLLECTION_SCHEMA_FILENAME}`;
+  const checked = validateUserWritePath(schemaPath);
+  if (
+    hiddenFile(schemaPath) ||
+    isFolderMarkerPath(schemaPath) ||
+    !checked.ok ||
+    checked.normalized !== schemaPath ||
+    (checkDest && workspaceDestinationError(schemaPath, "win32") !== null)
+  )
+    throw badRequest("Invalid Collection folder path.");
+  return value;
+}
+
+const isJsonSafe = (v: unknown, d = 0): boolean =>
+  d <= 8 &&
+  (v === null ||
+    typeof v === "string" ||
+    typeof v === "boolean" ||
+    (typeof v === "number" && Number.isFinite(v)) ||
+    (Array.isArray(v) && v.every((x) => isJsonSafe(x, d + 1))));
+
+function validateRecordFields(
+  raw: unknown,
+  schema: CollectionSchema | null,
+  requireNonEmpty: boolean,
+): Record<string, unknown> {
+  if (raw === undefined && !requireNonEmpty) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    throw badRequest("Fields must be an object.");
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if ((requireNonEmpty && !entries.length) || entries.length > MAX_FIELDS)
+    throw badRequest("Invalid field count.");
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [key, value] of entries) {
+    if (!key || key.length > 256 || key === RECORD_ID_FRONTMATTER_KEY || !isJsonSafe(value))
+      throw badRequest(`Invalid value for field "${key}".`);
+    const def = schema?.fields.find((f) => f.name === key);
+    if (def) {
+      if (def.type === "button" || validateFieldValue(def, value).status !== "valid")
+        throw badRequest(`Invalid value for field "${key}".`);
+    } else if (schema && !requireNonEmpty) throw badRequest(`Unknown field "${key}".`);
+    out[key] = typeof value === "number" && Object.is(value, -0) ? 0 : value;
+  }
+  return out;
+}
+
+const sanitizeJson = (v: unknown): unknown =>
+  v === null || typeof v === "string" || typeof v === "boolean"
+    ? v
+    : typeof v === "number"
+      ? Number.isFinite(v)
+        ? v
+        : null
+      : typeof v === "bigint"
+        ? v.toString()
+        : Array.isArray(v)
+          ? v.map(sanitizeJson)
+          : null;
+
+function readFrontmatter(
+  ctx: StorageContext,
+  workspaceId: string,
+  row: ScannedCollectionMarkdownFile,
+): Record<string, unknown> | null {
+  if (
+    row.contentKind !== "text" ||
+    row.byteLength === null ||
+    row.byteLength !== row.actualLength ||
+    row.byteLength > LIVE_MARKDOWN_MAX_BYTES
+  )
+    return null;
+  const full = row.byteLength <= APP_COLLECTION_MAX_RECORD_BYTES;
+  const bytes = full
+    ? readBoundedRelayBlob(ctx, workspaceId, row.blobSha256, APP_COLLECTION_MAX_RECORD_BYTES)
+    : (ctx.db
+        .prepare(
+          "SELECT substr(content,1,?) AS c FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?",
+        )
+        .get(APP_COLLECTION_MAX_RECORD_BYTES, workspaceId, row.blobSha256)?.c as
+        | Uint8Array
+        | undefined);
+  if (!(bytes instanceof Uint8Array)) return null;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: full }).decode(bytes);
+  } catch {
+    return null;
+  }
+  const block = FRONTMATTER_BLOCK_RE.exec(text)?.[0];
+  return block ? parseCollectionRecordFields(block) : null;
+}
+
+function overlayLiveFrontmatter(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  path: string,
+  objectId: string,
+): Record<string, unknown> | null {
+  const live = storage.readAcceptedLiveDocument(workspaceId, path);
+  if (live.kind !== "cut" || live.cut.document.objectId !== objectId) return null;
+  const bytes =
+    live.cut.checkpoint.bytes.byteLength +
+    live.cut.suffix.reduce((n, item) => n + item.bytes.byteLength, 0);
+  if (bytes > MAX_LIVE_OVERLAY_BYTES) return null;
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(
+      doc,
+      Y.mergeUpdates([live.cut.checkpoint.bytes, ...live.cut.suffix.map((i) => i.bytes)]),
+    );
+    return frontmatterMapValues(doc.getMap("frontmatter"));
+  } catch {
+    return null;
+  } finally {
+    doc.destroy();
+  }
+}
+
+function compareValues(a: unknown, b: unknown, dir: "asc" | "desc"): number {
+  const emptyA = a === null || a === undefined || a === "";
+  const emptyB = b === null || b === undefined || b === "";
+  if (emptyA || emptyB) return emptyA && emptyB ? 0 : emptyA ? 1 : -1;
+  const cmp =
+    typeof a === "number" && typeof b === "number"
+      ? a - b
+      : typeof a === "boolean" && typeof b === "boolean"
+        ? Number(a) - Number(b)
+        : String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+  return dir === "desc" ? -cmp : cmp;
+}
+
+function hasDatasetAncestor(ctx: StorageContext, workspaceId: string, folder: string): boolean {
+  const parts = folder.split("/");
+  const stmt = ctx.db.prepare(
+    "SELECT 1 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND path=?",
+  );
+  return (
+    parts.some(
+      (_, i) =>
+        stmt.get(workspaceId, [...parts.slice(0, i), "dataset.json"].join("/")) !== undefined,
+    ) || stmt.get(workspaceId, `${folder}/dataset.json`) !== undefined
+  );
+}
+
+function parseSchemaBlob(ctx: StorageContext, workspaceId: string, sha256: string) {
+  const blob = readBoundedRelayBlob(ctx, workspaceId, sha256, APP_COLLECTION_MAX_SCHEMA_BYTES);
+  if (!blob) return null;
+  try {
+    return parseCollectionSchema(new TextDecoder("utf-8", { fatal: true }).decode(blob));
+  } catch {
+    return null;
+  }
+}
+
+const summaryOf = (folder: string, parsed: ReturnType<typeof parseCollectionSchema>) => ({
+  path: folder,
+  name: parsed.schema.name?.trim() || posix.basename(folder),
+  description: parsed.schema.description,
+  status: parsed.status,
+  fields: parsed.schema.fields as FieldDefinition[],
+});
+
+export function runPhoneDocumentCollectionRead(
+  storage: SyncRelayStorage,
+  input: {
+    readonly workspaceId: string;
+    readonly operation: PhoneDocumentCollectionReadOperation;
+    readonly args: unknown;
+  },
+): { readonly result: unknown; readonly cursor: string } {
+  const ctx = storage as StorageContext;
+  const { workspaceId, operation } = input;
+  if (operation === "documentCollections") {
+    parseFields(input.args, []);
+    const collections = ctx.readTx(() => {
+      const rows = ctx.db
+        .prepare(
+          "SELECT path, blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND content_kind='text' AND path GLOB '*/collection.yaml' ORDER BY path LIMIT ?",
+        )
+        .all(workspaceId, MAX_COLLECTIONS);
+      return rows.flatMap((row) => {
+        const schemaPath = String(row.path);
+        const folder = parentDir(schemaPath);
+        if (
+          !folder ||
+          hiddenFile(schemaPath) ||
+          folder.split("/").some((s) => s.startsWith(".")) ||
+          hasDatasetAncestor(ctx, workspaceId, folder)
+        )
+          return [];
+        const parsed = parseSchemaBlob(ctx, workspaceId, String(row.blob_sha256));
+        return parsed ? [summaryOf(folder, parsed)] : [];
+      });
+    });
+    return {
+      result: { ok: true, collections },
+      cursor: currentAccountFeedCursor(storage, workspaceId, null),
+    };
+  }
+
+  const body = parseFields(input.args, [
+    "collectionPath",
+    "afterPath",
+    "limit",
+    "search",
+    "sortField",
+    "sortDirection",
+  ]);
+  const collectionPath = validateCollectionFolder(body.collectionPath);
+  const limit = body.limit === undefined ? PHONE_DOC_COLLECTION_PAGE : body.limit;
+  if (
+    typeof limit !== "number" ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > PHONE_DOC_COLLECTION_PAGE ||
+    (body.afterPath !== undefined &&
+      (typeof body.afterPath !== "string" || Buffer.byteLength(body.afterPath, "utf8") > 1_024)) ||
+    (body.search !== undefined && (typeof body.search !== "string" || body.search.length > 200)) ||
+    (body.sortField !== undefined &&
+      (typeof body.sortField !== "string" || !body.sortField || body.sortField.length > 256)) ||
+    (body.sortDirection !== undefined &&
+      body.sortDirection !== "asc" &&
+      body.sortDirection !== "desc")
+  )
+    throw badRequest("Invalid Document Collection query.");
+  const search = typeof body.search === "string" ? body.search.trim().toLowerCase() : "";
+  const sortField = typeof body.sortField === "string" ? body.sortField : null;
+  const sortDir = (body.sortDirection as "asc" | "desc" | undefined) ?? "asc";
+  const filtering = search.length > 0 || sortField !== null;
+
+  const snap = ctx.readTx(() => {
+    if (hasDatasetAncestor(ctx, workspaceId, collectionPath)) return null;
+    const row = ctx.db
+      .prepare(
+        "SELECT blob_sha256, content_kind FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND path=?",
+      )
+      .get(workspaceId, `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}`);
+    const parsed =
+      row?.content_kind === "text"
+        ? parseSchemaBlob(ctx, workspaceId, String(row.blob_sha256))
+        : null;
+    if (!parsed) return null;
+    if (sortField !== null && sortField !== "title") {
+      const def = parsed.schema.fields.find((f) => f.name === sortField);
+      if (!def || def.type === "button" || def.type === "multi-select")
+        throw badRequest("Invalid sort field.");
+    }
+    const target = filtering ? PHONE_DOC_COLLECTION_MAX_SCAN : limit;
+    const rows: Array<{
+      path: string;
+      objectId: string;
+      frontmatter: Record<string, unknown> | null;
+    }> = [];
+    let cursorPath = filtering ? undefined : (body.afterPath as string | undefined);
+    let scannedTotal = 0;
+    let hasMore = false;
+    while (rows.length < target && scannedTotal < PHONE_DOC_COLLECTION_MAX_SCAN) {
+      const scanned = scanCollectionMarkdownFiles(ctx, {
+        workspaceId,
+        versionId: "main",
+        collectionPath,
+        afterPath: cursorPath,
+        limit: Math.min(target - rows.length, PHONE_DOC_COLLECTION_MAX_SCAN - scannedTotal),
+        maxPathBytes: 1_024,
+      });
+      for (const item of scanned.rows) {
+        scannedTotal += 1;
+        cursorPath = item.path;
+        if (hiddenFile(item.path) || posix.basename(item.path).startsWith(".")) continue;
+        const objectId = storage.objectIdAtPathInVersion({
+          workspaceId,
+          versionId: "main",
+          path: item.path,
+        });
+        if (objectId)
+          rows.push({
+            path: item.path,
+            objectId,
+            frontmatter: readFrontmatter(ctx, workspaceId, item),
+          });
+      }
+      hasMore = scanned.hasMore;
+      if (!scanned.hasMore || !scanned.rows.length) break;
+    }
+    return { parsed, rows, hasMore, lastScanned: cursorPath ?? null };
+  });
+
+  const cursor = currentAccountFeedCursor(storage, workspaceId, null);
+  if (!snap)
+    return {
+      result: { ok: false, refusal: "not-found", reason: "This Collection is no longer here." },
+      cursor,
+    };
+
+  const schemaFields = snap.parsed.schema.fields.filter((f) => f.type !== "button");
+  const relationIds = new Set<string>();
+  let records = snap.rows.map((entry) => {
+    const raw =
+      overlayLiveFrontmatter(storage, workspaceId, entry.path, entry.objectId) ??
+      entry.frontmatter ??
+      {};
+    const rawId = raw[RECORD_ID_FRONTMATTER_KEY];
+    const title =
+      typeof raw.title === "string" && raw.title.trim()
+        ? raw.title.trim()
+        : posix.basename(entry.path).replace(/\.md$/i, "");
+    const values: Record<string, unknown> = {};
+    for (const field of schemaFields) {
+      if (!Object.hasOwn(raw, field.name)) continue;
+      const val = sanitizeJson(raw[field.name]);
+      values[field.name] = val;
+      if (field.type === "relation")
+        for (const item of Array.isArray(val) ? val : [val])
+          if (typeof item === "string" && isRecordId(item)) relationIds.add(item);
+    }
+    return {
+      path: entry.path,
+      objectId: entry.objectId,
+      recordId: typeof rawId === "string" && isRecordId(rawId) ? rawId : null,
+      title,
+      values,
+    };
+  });
+  if (search)
+    records = records.filter(
+      (r) =>
+        r.title.toLowerCase().includes(search) ||
+        Object.values(r.values).some(
+          (v) =>
+            v != null &&
+            (Array.isArray(v) ? v.join(" ") : String(v)).toLowerCase().includes(search),
+        ),
+    );
+  if (sortField)
+    records.sort(
+      (a, b) =>
+        compareValues(
+          sortField === "title" ? a.title : a.values[sortField],
+          sortField === "title" ? b.title : b.values[sortField],
+          sortDir,
+        ) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+    );
+  const relationLabels: Record<string, string> = {};
+  if (relationIds.size > 0) {
+    const lookup = ctx.db.prepare(
+      "SELECT path FROM sync_relay_current_record_ids WHERE workspace_id=? AND version_id='main' AND record_id=? LIMIT 1",
+    );
+    ctx.readTx(() => {
+      for (const id of relationIds) {
+        const hit = lookup.get(workspaceId, id);
+        if (typeof hit?.path === "string" && !hiddenFile(hit.path))
+          relationLabels[id] = posix.basename(hit.path).replace(/\.md$/i, "");
+      }
+    });
+  }
+  return {
+    result: {
+      ok: true,
+      collection: summaryOf(collectionPath, snap.parsed),
+      records,
+      relationLabels,
+      nextPath: filtering ? null : snap.hasMore ? snap.lastScanned : null,
+      bounded: filtering && snap.hasMore,
+    },
+    cursor,
+  };
+}
+
+async function createIdempotentFile(
+  files: VersionedLiveAdapter,
+  input: {
+    readonly workspaceId: string;
+    readonly path: string;
+    readonly text: string;
+    readonly requestId: string;
+    readonly correlationId: string;
+    readonly author: WriteAuthor;
+  },
+): Promise<{ readonly ok: true; readonly objectId: string } | { readonly ok: false }> {
+  try {
+    const written = await files.writeTextFile({
+      workspaceId: input.workspaceId,
+      versionId: "main",
+      path: input.path,
+      text: input.text,
+      publish: true,
+      createOnly: true,
+      requestId: input.requestId,
+      metadata: { origin: "api", correlationId: input.correlationId },
+      author: input.author,
+    });
+    return { ok: true, objectId: written.object.id };
+  } catch (error) {
+    if (!(error instanceof DaemonRefusalError)) throw error;
+    const existing = await files.readTextFile({
+      workspaceId: input.workspaceId,
+      versionId: "main",
+      path: input.path,
+    });
+    if (!existing) throw error;
+    return existing.metadataCorrelationId === input.correlationId
+      ? { ok: true, objectId: existing.objectId }
+      : { ok: false };
+  }
+}
+
+export async function runPhoneDocumentCollectionWrite(
+  deps: { readonly storage: SyncRelayStorage; readonly copies: ServerCopies },
+  input: {
+    readonly workspaceId: string;
+    readonly owner: string;
+    readonly operation: PhoneDocumentCollectionWriteOperation;
+    readonly args: unknown;
+    readonly visitor: Extract<CopyVisitor, { reason: "account" }>;
+    authorize(): Promise<void>;
+  },
+): Promise<{ readonly result: unknown; readonly cursor: string }> {
+  const { workspaceId, owner, operation, visitor } = input;
+  const signal = visitor.signal;
+  const authorize = () => untilAborted(input.authorize(), signal);
+  const author: WriteAuthor = { kind: "human", humanId: owner };
+  const objectAt = (path: string) =>
+    deps.storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path });
+  const unconfirmed = (what: string) =>
+    new RelayError("server_busy", `Your server could not confirm ${what} yet. Try again.`, 503);
+  const withCopy = <T>(
+    work: (replica: AutomationReplica, files: VersionedLiveAdapter) => Promise<T>,
+  ) =>
+    deps.copies.withServerCopy(owner, workspaceId, visitor, (replica) =>
+      replica.withRecordWork(async () => {
+        await authorize();
+        await replica.sync(signal);
+        await authorize();
+        const out = await work(
+          replica,
+          new VersionedLiveAdapter(replica.client, replica.workspace, { workspaceId }),
+        );
+        await authorize();
+        deps.copies.hold(visitor.userId, workspaceId);
+        return out;
+      }),
+    );
+
+  if (operation === "createDocumentCollection") {
+    const body = parseFields(input.args, ["folder", "name", "requestId"]);
+    const folder = validateCollectionFolder(body.folder, true);
+    const requestId = parseRequestId(body.requestId);
+    const name =
+      body.name === undefined
+        ? posix.basename(folder)
+        : typeof body.name === "string" && body.name.trim() && body.name.length <= 200
+          ? body.name.trim()
+          : (() => {
+              throw badRequest("Invalid Collection name.");
+            })();
+    const schemaPath = `${folder}/${COLLECTION_SCHEMA_FILENAME}`;
+    const correlationId = `phone-doc-collection-create:${requestId}`;
+    const yamlText = serializeCollectionSchema({
+      name,
+      description: null,
+      fields: [{ name: "Name", type: "text" }],
+      views: [],
+    });
+    const occupied = {
+      ok: false,
+      refusal: "folder-occupied",
+      reason: "A folder or file with that name already exists.",
+    };
+    const result = await withCopy(async (replica, files) => {
+      await files.ensureMainVersion({ workspaceId });
+      const existing = await files.readTextFile({
+        workspaceId,
+        versionId: "main",
+        path: schemaPath,
+      });
+      if (existing) {
+        if (existing.metadataCorrelationId !== correlationId) return occupied;
+        await replica.sync(signal);
+        if (objectAt(schemaPath) !== existing.objectId) throw unconfirmed("the new Collection");
+        return { ok: true, path: folder, objectId: existing.objectId };
+      }
+      await assertOutsideCollection(files, workspaceId, schemaPath);
+      const lower = folder.toLowerCase();
+      if (
+        (await files.listTextFileMetadata({ workspaceId, versionId: "main" })).some((f) => {
+          const p = f.path.toLowerCase();
+          return p === lower || p.startsWith(`${lower}/`);
+        })
+      )
+        return occupied;
+      const created = await createIdempotentFile(files, {
+        workspaceId,
+        path: schemaPath,
+        text: yamlText,
+        requestId,
+        correlationId,
+        author,
+      });
+      if (!created.ok) return occupied;
+      await replica.sync(signal);
+      if (objectAt(schemaPath) !== created.objectId) throw unconfirmed("the new Collection");
+      return { ok: true, path: folder, objectId: created.objectId };
+    });
+    return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };
+  }
+
+  if (operation === "createDocumentRecord") {
+    const body = parseFields(input.args, ["collectionPath", "name", "fields", "requestId"]);
+    const collectionPath = validateCollectionFolder(body.collectionPath);
+    const requestId = parseRequestId(body.requestId);
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (
+      !name ||
+      name.includes("/") ||
+      name.includes("\\") ||
+      name.startsWith(".") ||
+      workspaceNameError(`${name}.md`, "win32") !== null
+    )
+      throw badRequest("Invalid record name.");
+    const recordId = derivedRecordId(
+      `phone-doc-record:${workspaceId}:${collectionPath}:${requestId}`,
+    );
+    let prepared: ReturnType<typeof prepareCollectionRecord>;
+    try {
+      prepared = prepareCollectionRecord({ collectionPath, name, recordId });
+    } catch (error) {
+      throw badRequest(error instanceof Error ? error.message : "Invalid record path.");
+    }
+    validateAllowedFileWritePath(prepared.path, { allowSketch: false, checkDestination: true });
+    const correlationId = `phone-doc-record:${requestId}`;
+    const result = await withCopy(async (replica, files) => {
+      await files.ensureMainVersion({ workspaceId });
+      await assertOutsideCollection(files, workspaceId, prepared.path, true);
+      const schemaFile = await files.readTextFile({
+        workspaceId,
+        versionId: "main",
+        path: `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}`,
+      });
+      if (schemaFile?.contentKind !== "text" || typeof schemaFile.text !== "string")
+        return { ok: false, refusal: "not-found", reason: "This Collection is no longer here." };
+      const fields = validateRecordFields(
+        body.fields,
+        parseCollectionSchema(schemaFile.text).schema,
+        false,
+      );
+      const text = Object.keys(fields).length
+        ? writeMarkdownFrontmatter(prepared.text, {
+            [RECORD_ID_FRONTMATTER_KEY]: prepared.recordId,
+            ...fields,
+          })
+        : prepared.text;
+      const created = await createIdempotentFile(files, {
+        workspaceId,
+        path: prepared.path,
+        text,
+        requestId,
+        correlationId,
+        author,
+      });
+      if (!created.ok)
+        return {
+          ok: false,
+          refusal: "path-exists",
+          reason: "A record with this name already exists.",
+        };
+      await seedRichDocLineage(deps.storage, replica, {
+        workspaceId,
+        path: prepared.path,
+        objectId: created.objectId,
+      });
+      await replica.sync(signal);
+      if (
+        objectAt(prepared.path) !== created.objectId ||
+        !deps.storage.mainLiveLineageExists({ workspaceId, objectId: created.objectId })
+      )
+        throw unconfirmed("the new record");
+      return {
+        ok: true,
+        path: prepared.path,
+        objectId: created.objectId,
+        recordId: prepared.recordId,
+      };
+    });
+    return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };
+  }
+
+  const body = parseFields(input.args, ["path", "expectedObjectId", "fields", "requestId"]);
+  const { path } = validateAllowedFileWritePath(body.path, {
+    allowSketch: false,
+    checkDestination: false,
+  });
+  const expectedObjectId = parseObjectId(body.expectedObjectId);
+  const requestId = parseRequestId(body.requestId);
+  const rawFields = validateRecordFields(body.fields, null, true);
+  const result = await withCopy(async (replica, files) => {
+    await assertOutsideCollection(files, workspaceId, path, true);
+    const found = (await files.resolveFiles({ workspaceId, targets: [{ path }] })).results[0];
+    if (found?.status !== "found")
+      return { ok: false, refusal: "not-found", reason: "This file is no longer here." };
+    if (found.objectId !== expectedObjectId)
+      return {
+        ok: false,
+        refusal: "stale-object",
+        reason: "This file changed before your change finished. Try again.",
+      };
+    const folder = parentDir(path);
+    if (folder) {
+      const schemaFile = await files.readTextFile({
+        workspaceId,
+        versionId: "main",
+        path: `${folder}/${COLLECTION_SCHEMA_FILENAME}`,
+      });
+      if (schemaFile?.contentKind === "text" && typeof schemaFile.text === "string")
+        validateRecordFields(rawFields, parseCollectionSchema(schemaFile.text).schema, true);
+    }
+    if (
+      liveEditors(deps.storage).connected({ workspaceId, objectId: found.objectId }) ||
+      deps.storage.isHostedForLiveEditing(workspaceId, found.objectId)
+    )
+      return {
+        ok: false,
+        refusal: "live-active",
+        reason: "Someone is editing this page right now. Close it everywhere, then try again.",
+      };
+    try {
+      await setCollectionRecordFields(
+        replicaRecordEditContext(replica, replicaRecordEngine(replica), signal, true),
+        {
+          recordPath: path,
+          fields: rawFields,
+          author: { kind: "user", userId: owner },
+          idempotencyKeyPrefix: `phone-record-edit:${requestId}`,
+          preserveCompletedFields: true,
+          settleUnchanged: true,
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message === FRONTMATTER_EDIT_REFUSED_MESSAGE ||
+        message.includes("cannot be edited") ||
+        message.includes("can't edit this note")
+      )
+        return { ok: false, refusal: "edit-refused", reason: message };
+      throw error;
+    }
+    await replica.sync(signal);
+    return { ok: true, path, objectId: found.objectId };
+  });
+  return { result, cursor: currentAccountFeedCursor(deps.storage, workspaceId, null) };
+}

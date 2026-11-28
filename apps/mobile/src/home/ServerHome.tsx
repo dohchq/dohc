@@ -42,8 +42,10 @@ import { SettingsButton } from "../account/SettingsButton";
 import { HeaderButton } from "../AndroidHeader";
 import type { AppsState } from "../apps/appStore";
 import type { CollectionsState } from "../collections/collectionStore";
+import { NewDocumentCollectionSheet } from "../collections/DocumentCollectionScreens";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
+import { choose } from "../confirm";
 import { appState } from "../apps/reviewControls";
 import { shownProblem } from "../server/client";
 import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
@@ -77,10 +79,22 @@ export function ServerHome() {
   const { data } = useAccount();
   const canEditFiles = canWriteFiles(data, current);
   const lifecycle = useFileLifecycle(current?.name ?? "");
+  const [creatingCollection, setCreatingCollection] = useState(false);
+  useEffect(() => {
+    setCreatingCollection(false);
+  }, [data?.workspaceId]);
   const openCreate = () =>
     lifecycle.openCreate((path) =>
       router.push({ pathname: "/page", params: { path, t0: String(Date.now()) } }),
     );
+  const openCreateMenu = () =>
+    void choose({
+      title: workspaceWords.pages,
+      options: [{ label: workspaceWords.newPage }, { label: collectionWords.newCollection }],
+    }).then((picked) => {
+      if (picked === 0) openCreate();
+      else if (picked === 1) setCreatingCollection(true);
+    });
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -99,8 +113,8 @@ export function ServerHome() {
                     {canEditFiles ? (
                       <HeaderButton
                         icon={Plus}
-                        label={workspaceWords.newPage}
-                        onPress={openCreate}
+                        label={collectionWords.create}
+                        onPress={openCreateMenu}
                       />
                     ) : null}
                     <SettingsButton />
@@ -112,11 +126,17 @@ export function ServerHome() {
       {Platform.OS === "ios" ? (
         <Stack.Toolbar placement="right">
           {canEditFiles ? (
-            <Stack.Toolbar.Button
-              icon="plus"
-              accessibilityLabel={workspaceWords.newPage}
-              onPress={openCreate}
-            />
+            <Stack.Toolbar.Menu icon="plus" accessibilityLabel={collectionWords.create}>
+              <Stack.Toolbar.MenuAction icon="doc.badge.plus" onPress={openCreate}>
+                {workspaceWords.newPage}
+              </Stack.Toolbar.MenuAction>
+              <Stack.Toolbar.MenuAction
+                icon="tablecells"
+                onPress={() => setCreatingCollection(true)}
+              >
+                {collectionWords.newCollection}
+              </Stack.Toolbar.MenuAction>
+            </Stack.Toolbar.Menu>
           ) : null}
           <Stack.Toolbar.View hidesSharedBackground>
             <SettingsButton />
@@ -135,6 +155,16 @@ export function ServerHome() {
         />
       ) : null}
       {lifecycle.sheet}
+      {canEditFiles ? (
+        <NewDocumentCollectionSheet
+          open={creatingCollection}
+          onClose={() => setCreatingCollection(false)}
+          onCreated={(folder) => {
+            setCreatingCollection(false);
+            router.push({ pathname: "/document-collection", params: { path: folder } });
+          }}
+        />
+      ) : null}
     </ScrollView>
   );
 }
@@ -172,11 +202,18 @@ function Files({
   });
   const createAbort = useRef<AbortController | null>(null);
   const createAttempt = useRef<{ path: string; requestId: string } | null>(null);
-  const rows = useMemo(
-    () => (state.value ? homeRows(state.value, expanded, { showAllOthers }) : null),
-    [state.value, expanded, showAllOthers],
-  );
   const { data, apps, collections } = useAccount();
+  const { state: docCollectionsState } = useView(views.documentCollections);
+  const rows = useMemo(
+    () =>
+      state.value
+        ? homeRows(state.value, expanded, {
+            showAllOthers,
+            excludeDocumentCollections: !data?.joined,
+          })
+        : null,
+    [state.value, expanded, showAllOthers, data?.joined],
+  );
   const signIn = useSignIn();
   const openRowActions = useCallback(
     (item: EditableRow) =>
@@ -498,7 +535,7 @@ function Files({
           )}
         </>
       ) : null}
-      {collectionsState.collections?.length ? (
+      {collectionsState.collections?.length || docCollectionsState.value?.length ? (
         <SectionHeader
           title={collectionWords.collections}
           collapsed={collapsed.has("collections")}
@@ -507,9 +544,9 @@ function Files({
           onToggle={() => toggle(setCollapsed, "collections")}
         />
       ) : null}
-      {collapsed.has("collections")
-        ? null
-        : collectionsState.collections?.map((collection) => (
+      {collapsed.has("collections") ? null : (
+        <>
+          {collectionsState.collections?.map((collection) => (
             <Pressable
               key={collection.datasetId}
               onPressIn={() => void collections?.prefetch(collection.datasetId)}
@@ -531,6 +568,29 @@ function Files({
               </Text>
             </Pressable>
           ))}
+          {docCollectionsState.value?.map((collection) => (
+            <Pressable
+              key={`doc:${collection.path}`}
+              onPress={() =>
+                router.push({ pathname: "/document-collection", params: { path: collection.path } })
+              }
+              android_ripple={{ color: theme.panel2 }}
+              style={({ pressed }) => [
+                styles.row,
+                styles.app,
+                pressed ? { backgroundColor: theme.panel2 } : null,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={collection.name}
+            >
+              <Table2 size={18} color={theme.ink} strokeWidth={1.9} />
+              <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+                {collection.name}
+              </Text>
+            </Pressable>
+          ))}
+        </>
+      )}
       {fileSection("other", workspaceWords.otherFiles, rows?.others, () => setShowAllOthers(true))}
     </>
   );

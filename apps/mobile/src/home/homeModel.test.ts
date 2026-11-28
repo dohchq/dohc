@@ -99,6 +99,25 @@ describe("Home's rows", () => {
       objectId: "object:trip/route.excalidraw",
     });
   });
+
+  it("excludes Document Collection folders (collection.yaml) from plain pages unless disabled", () => {
+    const withDocs = [
+      ...files,
+      file("tasks/collection.yaml"),
+      file("tasks/first.md"),
+      file("tasks/nested/second.md"),
+    ];
+    const ownerRows = homeRows(withDocs, new Set(["tasks"]));
+    expect(ownerRows.pages.some((r) => r.path === "tasks" || r.path.startsWith("tasks/"))).toBe(
+      false,
+    );
+    expect(ownerRows.others.shown.some((r) => r.path.startsWith("tasks/"))).toBe(false);
+
+    const joinedRows = homeRows(withDocs, new Set(["tasks"]), {
+      excludeDocumentCollections: false,
+    });
+    expect(joinedRows.pages.some((r) => r.path === "tasks/first.md")).toBe(true);
+  });
 });
 
 describe("Home's apps", () => {

@@ -84,12 +84,18 @@ export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): st
 export function homeRows(
   files: readonly WorkspaceFile[],
   expanded: ReadonlySet<string>,
-  options?: { readonly showAllOthers?: boolean },
+  options?: { readonly showAllOthers?: boolean; readonly excludeDocumentCollections?: boolean },
 ): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
-  // A dataset's folder holds its dataset.json; everything under it belongs to the Collection.
+  const excludeDocCols = options?.excludeDocumentCollections !== false;
   const owners = new Set(
     files
-      .filter((file) => basename(file.path) === "dataset.json")
+      .filter((file) => {
+        const name = basename(file.path);
+        return (
+          name === "dataset.json" ||
+          (excludeDocCols && name === "collection.yaml" && file.path.includes("/"))
+        );
+      })
       .map((file) => dirname(file.path)),
   );
   const owned = (path: string) =>
