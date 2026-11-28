@@ -180,7 +180,7 @@ export function createBackgroundLiveStart(
         if (liveDocumentKindForPath(path) !== "richdoc") continue;
         if (classifyEngineFilePathForRead(path, process.platform).kind !== "tracked") continue;
         const key = keyOf(workspaceId, path);
-        if (!queued.has(key) && queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) break;
+        if (!queued.has(key) && queued.size >= BACKGROUND_LIVE_START_MAX_QUEUED) continue;
         accepted = true;
         deferred.delete(key);
         queued.set(key, { workspaceId, path });

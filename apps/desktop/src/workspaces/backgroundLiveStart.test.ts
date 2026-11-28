@@ -360,6 +360,18 @@ describe("background live start", () => {
     expect(started).toEqual(["w:a.md"]);
   });
 
+  it("still resets the quiet timer for an already-queued note following an overflow path when full", async () => {
+    const { queue, started } = setup();
+    const full = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED }, (_, i) => `n${i}.md`);
+    queue.note("w", full);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    queue.note("w", ["overflow.md", "n0.md"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(started).toEqual([]);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    expect(started).toEqual(["w:n0.md"]);
+  });
+
   it("defers on transient Show on phone failure and retries once visibility recovers", async () => {
     let available = false;
     const { queue, started } = setup({
