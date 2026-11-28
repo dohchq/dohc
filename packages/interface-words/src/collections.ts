@@ -83,4 +83,11 @@ export const collectionWords = {
   propertyRefused: "This property cannot be edited here.",
   creating: "Creating…",
   actionsFor: (name: string) => `Actions for ${name}`,
+  chooseFile: "Choose file",
+  replaceFile: "Replace file",
+  openAttachment: "Open file",
+  uploadingAttachment: "Uploading…",
+  attachmentTooLarge: "Attachments can be up to 20 MiB. Choose a smaller file.",
+  attachmentEmpty: "Empty files cannot be attached. Choose a file with content.",
+  attachmentUploadFailed: "dohc could not upload this attachment.",
 } as const;

@@ -130,5 +130,9 @@ export function fileWriteOperations(client: ServerClient, workspaceId: string) {
       input: { path: string; objectId: string; deleteMomentId: string; requestId: string },
       signal?: AbortSignal,
     ) => run("restoreDeletedFile", input, signal),
+    uploadFile: (
+      input: { path: string; requestId: string; bytesBase64: string },
+      signal?: AbortSignal,
+    ) => run("uploadFile", input, signal),
   };
 }

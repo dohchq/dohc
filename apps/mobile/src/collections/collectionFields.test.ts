@@ -71,12 +71,14 @@ describe("a field's value", () => {
       shownValue({ type: "relation" }, ["r-1", 2], files, { '"r-1"': "Acme Corp", "2": "Globex" }),
     ).toEqual({ kind: "text", text: "Acme Corp, Globex" });
     expect(shown("attachment", "file-1234567890abcdef")).toEqual({
-      kind: "text",
-      text: "receipt.pdf",
+      kind: "attachment",
+      fileId: "file-1234567890abcdef",
+      name: "receipt.pdf",
     });
     expect(shown("attachment", "file-without-a-name0")).toEqual({
-      kind: "text",
-      text: collectionWords.attachedFile,
+      kind: "attachment",
+      fileId: "file-without-a-name0",
+      name: collectionWords.attachedFile,
     });
   });
 
@@ -95,6 +97,12 @@ describe("a value in a record's row", () => {
       "https://example.com",
     );
     expect(rowText({ kind: "text", text: "Ana" }, "Name")).toBe("Ana");
+    expect(
+      rowText(
+        { kind: "attachment", fileId: "file-1234567890abcdef", name: "receipt.pdf" },
+        "Receipt",
+      ),
+    ).toBe("receipt.pdf");
   });
 });
 
@@ -102,7 +110,7 @@ describe("a field's editor", () => {
   const field = (type: DatasetColumnFieldType, options: string[] = []) => ({ type, options });
   const choices = ["Unpaid", "Paid", "Waived"];
 
-  it("edits the types the phone has an editor for, including readable relations, and not attachments or unreadable relations", () => {
+  it("edits the types the phone has an editor for, including attachments and readable relations, and not unreadable relations", () => {
     for (const type of [
       "text",
       "number",
@@ -111,12 +119,12 @@ describe("a field's editor", () => {
       "select",
       "multi-select",
       "date",
+      "attachment",
     ] as const)
       expect(editorKind({ type })).toBe(type);
     expect(editorKind({ type: "relation", relation: { many: false } })).toBe("relation");
     expect(editorKind({ type: "relation", relation: { many: true } })).toBe("relation");
     expect(editorKind({ type: "relation" })).toBeNull();
-    expect(editorKind({ type: "attachment" })).toBeNull();
   });
 
   it("starts from the record's value", () => {

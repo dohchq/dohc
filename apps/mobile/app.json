@@ -28,6 +28,7 @@
       ],
       "./plugins/apsEnvironmentPerBuild",
       "./plugins/androidLaunchTheme",
+      "expo-document-picker",
       "expo-notifications",
       "./plugins/iosCameraWithoutBarcodeCompanion",
       [

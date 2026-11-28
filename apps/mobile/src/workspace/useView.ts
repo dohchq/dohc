@@ -82,8 +82,12 @@ export function useProblemText(): (problem: ReadProblem) => string {
 export function useFailureNotice(
   id: string,
   title: string,
-  state: { readonly problem: ReadProblem | null; readonly failures: number },
-  retry: () => void,
+  state: {
+    readonly problem: ReadProblem | null;
+    readonly failures: number;
+    readonly body?: string;
+  },
+  retry?: (() => void) | null,
 ) {
   const showToast = useShowToast();
   const hideToast = useHideToast();
@@ -101,14 +105,15 @@ export function useFailureNotice(
       dismiss(id);
     }
     if (!step.show || state.problem === null) return;
-    const body = problemText(state.problem);
-    const again = () => latest.current.retry();
+    const body = state.body ?? problemText(state.problem);
+    const retries = latest.current.retry !== null && latest.current.retry !== undefined;
+    const again = () => latest.current.retry?.();
     showToast({
       id,
       tone: "failure",
       title: latest.current.title,
       body,
-      action: { label: noticesWords.tryAgain, onPress: again },
+      ...(retries ? { action: { label: noticesWords.tryAgain, onPress: again } } : {}),
     });
     add({
       id,
@@ -119,8 +124,8 @@ export function useFailureNotice(
       minutesAgo: 0,
       atMs: Date.now(),
       read: false,
-      retry: true,
-      onRetry: again,
+      retry: retries,
+      onRetry: retries ? again : undefined,
       dismissible: true,
       failed: true,
     });

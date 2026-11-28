@@ -28,6 +28,7 @@ import { DamagedKept } from "../conversation/DamagedKept";
 import { useOutboxState } from "../conversation/useOutbox";
 import { createScopedEnds, type ScopedEnds } from "../pages/pageLive";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
+import { clearBinaryCacheOnSignInChange, clearBinaryFileCache } from "../server/binaryFiles";
 import { createCacheRows } from "../server/cacheRows";
 import { createCaptureQueue, type CaptureQueue } from "../server/captureQueue";
 import { createCacheDatabase, createKeptDatabase } from "../server/keptDatabase";
@@ -153,10 +154,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       store: secureSignInStore,
       fetch,
       onSignOut: teardown.signOut(async (leave, ending) => {
+        clearBinaryFileCache();
         await captureQueue.holdForSignOut();
         try {
           await outbox.signOut(leave, ending);
         } finally {
+          clearBinaryFileCache();
           captureQueue.releaseSignOut();
         }
       }),
@@ -174,6 +177,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const signIn = state.status === "signed-in" ? state.signIn : null;
 
   useEffect(() => cache.follow(account), [account, cache]);
+  useEffect(() => clearBinaryCacheOnSignInChange(account), [account]);
   useEffect(() => pageTimings?.follow(account), [account]);
 
   useEffect(() => outbox.follow(account), [account, outbox]);

@@ -112,6 +112,7 @@ import { createAutomationServerRoutes, type ServerRuns } from "./automationServe
 import { createWorkspaceBlobRoutes } from "./workspaceBlobRoutes";
 import { createAccountFeedWaits } from "./accountFeed";
 import {
+  accountOperationMaxBodyBytes,
   createAccountOperationRateLimiter,
   createAccountOperationRoute,
 } from "./accountOperationRoutes";
@@ -980,6 +981,7 @@ export function createSyncRelayHandler({
         ...(shareWebOrigin && relayExchangeKeyHash
           ? { browser: { origin: shareWebOrigin, hasExchangeKey: hasValidRelayExchangeKey } }
           : {}),
+        admitBlobBytes: admitLinkBlobBytes,
       })
     : undefined;
   // The owner's computers claim wakes here; the phone reads wakes through its operations route.
@@ -2366,6 +2368,8 @@ export function maxRequestBodyBytes(url: URL): number {
       return MAX_HTTP_APPROVAL_BODY_BYTES;
     case "workspace-outbound-dispatch":
       return MAX_OUTBOUND_DISPATCH_BODY_BYTES;
+    case "account-operation":
+      return accountOperationMaxBodyBytes(route.operation);
     case "workspace-webhooks":
     case "workspace-webhook":
     case "workspace-webhook-rotate":

@@ -10,6 +10,7 @@ import {
   APP_BACKEND_INPUT_BYTES,
   AppBackendLimitError,
   parseAppBackendJson,
+  parseAppBackendUploadRequest,
   type AppBackendJson,
 } from "@dohc/security-contract/app-backend";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
@@ -47,6 +48,8 @@ const OPERATIONS = new Set([
   "collectionCreate",
   "collectionDelete",
   "collectionRelationOptions",
+  "collectionAttachmentUpload",
+  "collectionAttachmentRead",
 ]);
 
 /** They reach the relay's dataset host, so they need no server copy. */
@@ -57,7 +60,16 @@ export function isPhoneCollectionOperation(name: string): boolean {
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const FILE_ID = /^[A-Za-z0-9_-]{16,128}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
-const EDITABLE = new Set(["text", "number", "checkbox", "date", "select", "multi-select", "url"]);
+const EDITABLE = new Set([
+  "text",
+  "number",
+  "checkbox",
+  "date",
+  "select",
+  "multi-select",
+  "url",
+  "attachment",
+]);
 /** What the host says when a request names rules it has replaced: nothing ran, and the same request never can. */
 const RULES_REPLACED = "The Collection's rules changed. Its owner must approve this access again.";
 const KEY_USED = "This retry key was already used for different values. Start a new response.";
@@ -173,7 +185,9 @@ function cursor(value: unknown): { id: string | number; value: AppBackendJson } 
 export function createPhoneCollections(options: {
   storage: SyncRelayStorage;
   /** Absent while this server keeps no Collections. */
-  host: Pick<RelayDatasetHost, "list" | "describe" | "invoke"> | undefined;
+  host:
+    | Pick<RelayDatasetHost, "list" | "describe" | "invoke" | "dataUpload" | "dataReadFile">
+    | undefined;
 }) {
   const storage = options.storage as StorageContext;
 
@@ -515,6 +529,15 @@ export function createPhoneCollections(options: {
         throw badRequest("Invalid Collection arguments.");
       return { revision, revisionSha256, idempotencyKey };
     };
+    const isLimitError = (error: unknown): error is Error =>
+      error instanceof AppBackendLimitError ||
+      (error instanceof Error && error.name === "AppBackendLimitError");
+    const visibleAuth = (datasetId: string, extraGuard?: () => void) =>
+      guarded(() => {
+        stillHolds();
+        if (!visible(workspaceId, datasetId)) throw notFound();
+        extraGuard?.();
+      });
     const refusedHere = { refused: { code: "forbidden", message: RULES_DISALLOW } };
     const commit = async (
       datasetId: string,
@@ -527,21 +550,14 @@ export function createPhoneCollections(options: {
       try {
         // The phone's stamp, not the description's: a retry sends what its first try sent. The operation checks the
         // values, which the route read as JSON.
-        ({ result } = await host.invoke(
-          guarded(() => {
-            stillHolds();
-            if (!visible(workspaceId, datasetId)) throw notFound();
-            extraGuard?.();
-          }),
-          {
-            workspaceId,
-            datasetId,
-            ...stamp,
-            operationId,
-            input: operationInput,
-            signal: input.signal,
-          },
-        ));
+        ({ result } = await host.invoke(visibleAuth(datasetId, extraGuard), {
+          workspaceId,
+          datasetId,
+          ...stamp,
+          operationId,
+          input: operationInput,
+          signal: input.signal,
+        }));
       } catch (error) {
         if (isAppBackendRuntimeError(error)) {
           await answers(datasetId);
@@ -549,10 +565,7 @@ export function createPhoneCollections(options: {
             answer: { refused: { code: error.refusal.code, message: error.refusal.message } },
           };
         }
-        if (
-          error instanceof AppBackendLimitError ||
-          (error instanceof Error && error.name === "AppBackendLimitError")
-        ) {
+        if (isLimitError(error)) {
           await answers(datasetId);
           return {
             answer: { refused: { code: "resource_limit", message: error.message } },
@@ -806,6 +819,129 @@ export function createPhoneCollections(options: {
       }
       return { options, nextCursor: page.nextCursor };
     }
+    if (operation === "collectionAttachmentUpload") {
+      const body = args(input.args, [
+        "datasetId",
+        "tableId",
+        "fieldId",
+        "revision",
+        "revisionSha256",
+        "idempotencyKey",
+        "name",
+        "contentType",
+        "bytesBase64",
+      ]);
+      const datasetId = id(body.datasetId),
+        tableId = id(body.tableId),
+        fieldId = id(body.fieldId),
+        stamp = stamped(body);
+      let upload: ReturnType<typeof parseAppBackendUploadRequest>;
+      try {
+        upload = parseAppBackendUploadRequest({
+          authorityRevision: stamp.revision,
+          idempotencyKey: stamp.idempotencyKey,
+          name: body.name,
+          contentType: body.contentType,
+          bytesBase64: body.bytesBase64,
+        });
+      } catch (error) {
+        if (isLimitError(error)) throw error;
+        throw badRequest(error instanceof Error ? error.message : "Invalid attachment upload.");
+      }
+      const description = describe(host, auth, workspaceId, datasetId);
+      const field = description.tables
+        .find((table) => table.tableId === tableId)
+        ?.fields.find((item) => item.fieldId === fieldId);
+      if (field?.type !== "attachment") throw notFound();
+      if (
+        !editOperation(host, auth, workspaceId, description, tableId, field) &&
+        !createSpec(host, auth, workspaceId, description, tableId)?.allowedFieldIds.has(fieldId)
+      )
+        return refusedHere;
+      try {
+        const uploaded = host.dataUpload(
+          visibleAuth(datasetId),
+          {
+            workspaceId,
+            datasetId,
+            ...stamp,
+            fieldId,
+            name: upload.name,
+            contentType: upload.contentType,
+            bytesBase64: upload.bytesBase64,
+          },
+          input.signal,
+        );
+        await answers(datasetId);
+        return uploaded;
+      } catch (error) {
+        if (
+          error instanceof DatasetHostError &&
+          error.code === "conflict" &&
+          error.message === RULES_REPLACED
+        ) {
+          await answers(datasetId);
+          return { rulesChanged: true };
+        }
+        throw error;
+      }
+    }
+    if (operation === "collectionAttachmentRead") {
+      const body = args(input.args, ["datasetId", "tableId", "recordId", "fieldId", "fileId"]);
+      const datasetId = id(body.datasetId),
+        tableId = id(body.tableId),
+        fieldId = id(body.fieldId),
+        { recordId, fileId } = body;
+      if (!isRecordId(recordId) || typeof fileId !== "string" || !FILE_ID.test(fileId))
+        throw badRequest("Invalid Collection arguments.");
+      const description = describe(host, auth, workspaceId, datasetId);
+      const table = description.tables.find((item) => item.tableId === tableId);
+      const read = readOperation(description, tableId);
+      const key = table?.primaryKeyFieldId;
+      if (
+        table?.fields.find((item) => item.fieldId === fieldId)?.type !== "attachment" ||
+        !read?.fieldIds.includes(fieldId) ||
+        !key ||
+        !read.fieldIds.includes(key)
+      )
+        throw notFound();
+      const loaded = await host.dataReadFile(
+        visibleAuth(datasetId),
+        {
+          workspaceId,
+          datasetId,
+          revision: description.revision,
+          revisionSha256: description.revisionSha256,
+          fileId,
+          fieldId,
+          operationId: read.operationId,
+          input: { limit: 1, filters: [{ fieldId: key, value: recordId }] },
+        },
+        input.signal,
+      );
+      const fresh = await answers(datasetId);
+      const freshRead = readOperation(fresh, tableId);
+      if (
+        fresh.revision !== description.revision ||
+        fresh.revisionSha256 !== description.revisionSha256 ||
+        freshRead?.operationId !== read.operationId ||
+        !freshRead.fieldIds.includes(fieldId) ||
+        fresh.tables
+          .find((item) => item.tableId === tableId)
+          ?.fields.find((item) => item.fieldId === fieldId)?.type !== "attachment"
+      )
+        throw notFound();
+      const bytes = Buffer.from(loaded.bytesBase64, "base64");
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-content-type-options": "nosniff",
+          "cache-control": "private, no-store",
+          "content-length": String(bytes.byteLength),
+        },
+      });
+    }
     const body = args(
       input.args,
       ["datasetId", "tableId"],
@@ -1053,7 +1189,8 @@ export function createPhoneCollections(options: {
     /** One Collection operation, answered as the dataset routes answer the host's refusals. */
     async respond(input: Parameters<typeof run>[0]): Promise<Response> {
       try {
-        return jsonResponse({ ok: true, result: await run(input) });
+        const answer = await run(input);
+        return answer instanceof Response ? answer : jsonResponse({ ok: true, result: answer });
       } catch (error) {
         if (isDatasetReopenWaitError(error) || isDatasetWorkerFailure(error))
           return jsonResponse(

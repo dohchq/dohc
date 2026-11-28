@@ -82,4 +82,18 @@ export const workspaceWords = {
   captureCouldntKeep: "dohc could not save this note on this phone.",
   edit: "Edit",
   discard: "Discard",
+  uploadFile: "Upload file",
+  fileUploaded: (name: string) => `Uploaded ${name}`,
+  fileUploadFailed: "dohc could not upload this file.",
+  fileTooLarge: "Files can be up to 5 MiB. Choose a smaller file.",
+  fileEmpty: "Empty files cannot be uploaded. Choose a file with content.",
+  filePathNotAllowed:
+    "This file name or type cannot be uploaded here. Rename it or choose another file.",
+  fileReadFailed: "dohc could not load this file.",
+  fileMissing: "dohc could not find this file.",
+  filePreviewUnavailable: "This file cannot be previewed in dohc.",
+  fileTextTooLarge: "Files larger than 512 KiB are not previewed inline.",
+  openInAnotherApp: "Open in another app",
+  shareFile: "Share file",
+  fileOpenFailed: "dohc could not open this file in another app.",
 } as const;

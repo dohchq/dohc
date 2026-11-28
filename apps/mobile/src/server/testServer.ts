@@ -11,7 +11,14 @@ export interface Call {
   readonly signal: AbortSignal;
 }
 
-export type Answer = { readonly status: number; readonly body?: unknown } | "offline";
+export type Answer =
+  | {
+      readonly status: number;
+      readonly body?: unknown;
+      readonly bytes?: Uint8Array;
+      readonly headers?: Readonly<Record<string, string>>;
+    }
+  | "offline";
 type Route = (call: Call) => Answer | Promise<Answer>;
 
 export function testServer(origin = "https://dohc.example.com") {
@@ -42,8 +49,15 @@ export function testServer(origin = "https://dohc.example.com") {
       }),
     ]);
     if (answer === "offline") throw new TypeError("Network request failed");
-    return new Response(answer.body === undefined ? null : JSON.stringify(answer.body), {
+    const payload =
+      answer.bytes !== undefined
+        ? new Uint8Array(answer.bytes)
+        : answer.body === undefined
+          ? null
+          : JSON.stringify(answer.body);
+    return new Response(payload, {
       status: answer.status,
+      ...(answer.headers ? { headers: answer.headers } : {}),
     });
   };
   return {

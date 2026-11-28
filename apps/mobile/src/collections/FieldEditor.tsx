@@ -17,7 +17,7 @@ import { ripple, TOUCH } from "../touch";
 import { ScreenFailure } from "../workspace/ListStates";
 import { draftOf, editorKind, valueOf, type Draft, type EditorKind } from "./collectionFields";
 import { recordKey, type WorkspaceCollections } from "./collectionStore";
-import { FieldInput } from "./FieldInput";
+import { FieldInput, useAttachmentUpload } from "./FieldInput";
 import { RelationPicker } from "./RelationPicker";
 
 // One field of the open record, changed in a sheet: Cancel and Save in its header, as iOS edits a value. Save sends the
@@ -40,23 +40,29 @@ export function FieldEditorScreen() {
       ...(fieldId && current ? current.relations[fieldId] : undefined),
       ...(pending && pending.change.fieldId === fieldId ? pending.relationLabels : undefined),
     };
-    return edit && collections ? { store: collections, edit, labels } : null;
+    const fileNames = { ...current?.files, ...pending?.fileNames };
+    return edit && collections ? { store: collections, edit, labels, fileNames } : null;
   });
   const kind = opened ? editorKind(opened.edit.field) : null;
   if (!phoneWrites || !opened || !kind)
     return <ScreenFailure text={collectionWords.recordMissing} />;
-  const { store, edit, labels } = opened;
+  const { store, edit, labels, fileNames } = opened;
   const current = edit.from.value;
   return (
     <Editor
       store={store}
+      datasetId={edit.from.datasetId}
       tableId={edit.from.tableId}
+      recordId={edit.from.recordId}
+      revision={edit.from.revision}
+      revisionSha256={edit.from.revisionSha256}
       field={edit.field}
       kind={kind}
       start={value === undefined ? current : parsed(value, current)}
       current={current}
       initialLabels={labels}
-      onSave={(next, nextLabels) => store.change(edit, next, nextLabels)}
+      initialFiles={fileNames}
+      onSave={(next, nextLabels, nextFiles) => store.change(edit, next, nextLabels, nextFiles)}
     />
   );
 }
@@ -71,27 +77,47 @@ function parsed(text: string, otherwise: RecordValue): RecordValue {
 
 function Editor(props: {
   store: WorkspaceCollections;
+  datasetId: string;
   tableId: string;
+  recordId: RecordId;
+  revision: number;
+  revisionSha256: string;
   field: CollectionField;
   kind: EditorKind;
   start: RecordValue;
   current: RecordValue;
   initialLabels: Readonly<Record<string, string>>;
-  onSave(value: RecordValue, relationLabels?: Readonly<Record<string, string>>): void;
+  initialFiles: Readonly<Record<string, string>>;
+  onSave(
+    value: RecordValue,
+    relationLabels?: Readonly<Record<string, string>>,
+    fileNames?: Readonly<Record<string, string>>,
+  ): void;
 }) {
-  const { store, tableId, field, kind } = props;
+  const { store, datasetId, tableId, recordId, revision, revisionSha256, field, kind } = props;
   const theme = useTheme();
   const router = useRouter();
   const [draft, setDraft] = useState<Draft>(() => draftOf(field, props.start));
   const [labels, setLabels] = useState<Readonly<Record<string, string>>>(props.initialLabels);
+  const [files, setFiles] = useState<Readonly<Record<string, string>>>(props.initialFiles);
+  const onUploaded = useCallback((_: string, fileId: string, name: string) => {
+    setFiles((cur) => ({ ...cur, [fileId]: name }));
+    setDraft(fileId);
+  }, []);
+  const upload = useAttachmentUpload({ store, tableId, revision, revisionSha256, onUploaded });
   const save = (next: Draft = draft) => {
+    if (upload.uploadingField !== null) return;
     const result = valueOf(field, next);
     if (!result) {
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       return;
     }
     if (JSON.stringify(result.value) !== JSON.stringify(props.current))
-      props.onSave(result.value, kind === "relation" ? labels : undefined);
+      props.onSave(
+        result.value,
+        kind === "relation" ? labels : undefined,
+        kind === "attachment" ? files : undefined,
+      );
     router.back();
   };
   const loadRelations = useCallback(
@@ -151,7 +177,40 @@ function Editor(props: {
         onSubmit={() => save()}
         inlineDate
         autoFocus
+        error={upload.errors[field.fieldId] ?? null}
         onClearDate={props.current === null || props.current === "" ? null : () => save("")}
+        attachmentName={typeof draft === "string" && draft ? (files[draft] ?? null) : null}
+        uploadingAttachment={upload.uploadingField === field.fieldId}
+        onPickAttachment={kind === "attachment" ? () => void upload.pick(field.fieldId) : undefined}
+        onClearAttachment={
+          kind === "attachment"
+            ? () => {
+                upload.clearField(field.fieldId);
+                setDraft("");
+              }
+            : null
+        }
+        onRetryAttachment={upload.retryable ? upload.retry : null}
+        onOpenAttachment={
+          kind === "attachment" &&
+          typeof draft === "string" &&
+          draft.length > 0 &&
+          draft === props.current
+            ? () =>
+                router.push({
+                  pathname: "/file",
+                  params: {
+                    datasetId,
+                    tableId,
+                    recordId: String(recordId),
+                    ...(typeof recordId === "number" ? { recordIdNum: "1" } : {}),
+                    fieldId: field.fieldId,
+                    fileId: draft,
+                    name: files[draft] ?? collectionWords.attachedFile,
+                  },
+                })
+            : null
+        }
       />
     </ScrollView>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { failureStep, type Reported } from "./failureReports";
+import { failureStep, instanceFailureState, type Reported } from "./failureReports";
 
 const none: Reported = { instance: 1, failures: 0 };
 const busy = (failures: number) => ({ problem: "server-busy" as const, failures });
@@ -31,5 +31,22 @@ describe("reporting a failure", () => {
       takeBack: true,
     });
     expect(failureStep({ instance: 2, failures: 0 }, 2, fine(0)).takeBack).toBe(false);
+  });
+
+  it("drops a previous store's failure state before reset runs so the next store's first failure still shows", () => {
+    const first = { instance: 1, problem: "refused" as const, failures: 1 };
+    const reported = failureStep(none, 1, instanceFailureState(first, 1)).reported;
+    const switched = failureStep(reported, 2, instanceFailureState(first, 2));
+    expect(switched).toEqual({
+      reported: { instance: 2, failures: 0 },
+      show: false,
+      takeBack: true,
+    });
+    const next = { instance: 2, problem: "offline" as const, failures: 1 };
+    expect(failureStep(switched.reported, 2, instanceFailureState(next, 2))).toEqual({
+      reported: { instance: 2, failures: 1 },
+      show: true,
+      takeBack: false,
+    });
   });
 });

@@ -1311,6 +1311,10 @@ describe("sync relay handler", () => {
       blobHave: cap("/sync/w1/blobs/have"),
       presence: cap("/sync/w1/presence"),
       moderation: cap("/sync/shares/s1/discussion/moderation"),
+      accountOpUploadFile: cap("/sync/w1/ops/uploadFile"),
+      accountOpAttachmentUpload: cap("/sync/w1/ops/collectionAttachmentUpload"),
+      accountOpSaveSketch: cap("/sync/w1/ops/saveSketch"),
+      accountOpDefault: cap("/sync/w1/ops/files"),
     }).toEqual({
       log: largest,
       blob: largest,
@@ -1332,6 +1336,10 @@ describe("sync relay handler", () => {
       blobHave: 256 * 1024,
       presence: 256 * 1024,
       moderation: 256 * 1024,
+      accountOpUploadFile: 4 * Math.ceil((5 * 1024 * 1024) / 3) + 64 * 1024,
+      accountOpAttachmentUpload: 28 * 1024 * 1024,
+      accountOpSaveSketch: 4 * 1024 * 1024,
+      accountOpDefault: 256 * 1024,
     });
     // The largest bodies shipped desktops send here: 100 paths of 1,024 three-byte
     // characters, and a full batch of blob hashes.

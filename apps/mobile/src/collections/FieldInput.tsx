@@ -1,14 +1,181 @@
 import { collectionWords } from "@dohc/interface-words/collections";
+import { noticesWords } from "@dohc/interface-words/notices";
 import type { DatasetColumnFieldType } from "@dohc/security-contract/dataset";
 import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
+import * as Crypto from "expo-crypto";
 import * as Haptics from "expo-haptics";
-import { Check, ChevronRight } from "lucide-react-native";
-import { useEffect, useState } from "react";
-import { Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { Check, ChevronRight, Paperclip } from "lucide-react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { ActionPill } from "../notices/ActionPill";
+import { encodeBase64, MAX_ATTACHMENT_UPLOAD_BYTES, pickDocument } from "../server/binaryFiles";
+import { shownProblem } from "../server/client";
 import type { CollectionRelation, RecordId } from "../server/phoneCollections";
 import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
+import { useProblemText } from "../workspace/useView";
 import { dateOf, dayOf, rowText, shownValue, type Draft } from "./collectionFields";
+import type { WorkspaceCollections } from "./collectionStore";
+
+type PendingAttachment = {
+  readonly fieldId: string;
+  readonly idempotencyKey: string;
+  readonly name: string;
+  readonly contentType: string;
+  readonly bytesBase64: string;
+};
+
+export function useAttachmentUpload(options: {
+  readonly store: WorkspaceCollections;
+  readonly tableId: string;
+  readonly revision?: number;
+  readonly revisionSha256?: string;
+  readonly onUploaded: (fieldId: string, fileId: string, name: string) => void;
+}) {
+  const { store, tableId, revision, revisionSha256, onUploaded } = options;
+  const problemText = useProblemText();
+  const [uploadingField, setUploadingField] = useState<string | null>(null);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [retryable, setRetryable] = useState<PendingAttachment | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const genRef = useRef(0);
+  const pickingRef = useRef(false);
+  useEffect(
+    () => () => {
+      genRef.current += 1;
+      abortRef.current?.abort();
+    },
+    [],
+  );
+  const send = useCallback(
+    async (payload: PendingAttachment, gen: number) => {
+      if (genRef.current !== gen) return;
+      setUploadingField(payload.fieldId);
+      setErrors((cur) => {
+        const next = { ...cur };
+        delete next[payload.fieldId];
+        return next;
+      });
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const answer = await store.uploadAttachment(
+          {
+            tableId,
+            fieldId: payload.fieldId,
+            ...(revision !== undefined ? { revision } : {}),
+            ...(revisionSha256 !== undefined ? { revisionSha256 } : {}),
+            idempotencyKey: payload.idempotencyKey,
+            name: payload.name,
+            contentType: payload.contentType,
+            bytesBase64: payload.bytesBase64,
+          },
+          controller.signal,
+        );
+        if (controller.signal.aborted || genRef.current !== gen) return;
+        setRetryable(null);
+        if (answer.kind === "uploaded") {
+          onUploaded(payload.fieldId, answer.file.fileId, answer.file.name);
+        } else {
+          setErrors((cur) => ({
+            ...cur,
+            [payload.fieldId]:
+              answer.kind === "rulesChanged"
+                ? collectionWords.rulesChanged
+                : collectionWords.refused(answer.message),
+          }));
+        }
+      } catch (error) {
+        if (controller.signal.aborted || genRef.current !== gen) return;
+        const problem = shownProblem(error);
+        if (problem !== null) {
+          setRetryable(problem === "refused" ? null : payload);
+          setErrors((cur) => ({
+            ...cur,
+            [payload.fieldId]: `${collectionWords.attachmentUploadFailed} ${problemText(problem)}`,
+          }));
+        }
+      } finally {
+        if (abortRef.current === controller) abortRef.current = null;
+        if (genRef.current === gen) setUploadingField(null);
+      }
+    },
+    [onUploaded, problemText, revision, revisionSha256, store, tableId],
+  );
+  const pick = useCallback(
+    async (fieldId: string) => {
+      if (uploadingField !== null || pickingRef.current) return;
+      pickingRef.current = true;
+      const gen = genRef.current;
+      try {
+        const picked = await pickDocument(MAX_ATTACHMENT_UPLOAD_BYTES);
+        if (genRef.current !== gen) return;
+        if (!picked.ok) {
+          if (picked.reason !== "canceled") {
+            setRetryable((cur) => (cur?.fieldId === fieldId ? null : cur));
+            const msg =
+              picked.reason === "too-large"
+                ? collectionWords.attachmentTooLarge
+                : picked.reason === "empty"
+                  ? collectionWords.attachmentEmpty
+                  : collectionWords.attachmentUploadFailed;
+            setErrors((cur) => ({ ...cur, [fieldId]: msg }));
+          }
+          return;
+        }
+        setRetryable(null);
+        await send(
+          {
+            fieldId,
+            idempotencyKey: Crypto.randomUUID(),
+            name: picked.name,
+            contentType: picked.mimeType,
+            bytesBase64: encodeBase64(picked.bytes),
+          },
+          gen,
+        );
+      } finally {
+        pickingRef.current = false;
+      }
+    },
+    [send, uploadingField],
+  );
+  return {
+    uploadingField,
+    errors,
+    retryable,
+    pick,
+    retry: () => {
+      if (retryable && uploadingField === null && !pickingRef.current)
+        void send(retryable, genRef.current);
+    },
+    clearField: (fieldId: string) => {
+      setRetryable((cur) => (cur?.fieldId === fieldId ? null : cur));
+      setErrors((cur) => {
+        if (!Object.hasOwn(cur, fieldId)) return cur;
+        const next = { ...cur };
+        delete next[fieldId];
+        return next;
+      });
+    },
+    reset: () => {
+      genRef.current += 1;
+      abortRef.current?.abort();
+      setUploadingField(null);
+      setErrors({});
+      setRetryable(null);
+    },
+  };
+}
 
 export interface FieldInputSpec {
   readonly name: string;
@@ -30,6 +197,12 @@ export interface FieldInputProps {
   readonly error?: string | null;
   readonly relationLabels?: Readonly<Record<string, string>>;
   readonly onPickRelation?: () => void;
+  readonly attachmentName?: string | null;
+  readonly uploadingAttachment?: boolean;
+  readonly onPickAttachment?: () => void;
+  readonly onClearAttachment?: (() => void) | null;
+  readonly onOpenAttachment?: (() => void) | null;
+  readonly onRetryAttachment?: (() => void) | null;
 }
 
 export function FieldInput(props: FieldInputProps) {
@@ -120,6 +293,61 @@ export function FieldInput(props: FieldInputProps) {
         <ChevronRight size={18} color={theme.subtle} strokeWidth={2} />
       </Pressable>
     );
+  } else if (field.type === "attachment") {
+    const fileId = typeof draft === "string" ? draft.trim() : "";
+    const busy = props.uploadingAttachment === true;
+    const shownName = props.attachmentName ?? (fileId ? collectionWords.attachedFile : null);
+    control = (
+      <>
+        {fileId ? (
+          <Pressable
+            disabled={!props.onOpenAttachment}
+            onPress={props.onOpenAttachment ?? undefined}
+            android_ripple={ripple(theme)}
+            style={[styles.row, { borderColor: theme.line }]}
+            accessibilityRole={props.onOpenAttachment ? "button" : "text"}
+            accessibilityLabel={shownName ?? collectionWords.attachedFile}
+          >
+            <Paperclip size={18} color={theme.accent} strokeWidth={2} />
+            <Text
+              style={[
+                styles.text,
+                { flex: 1, color: props.onOpenAttachment ? theme.accent : theme.ink },
+              ]}
+              numberOfLines={1}
+            >
+              {shownName}
+            </Text>
+          </Pressable>
+        ) : null}
+        <Pressable
+          disabled={disabled || busy || !props.onPickAttachment}
+          onPress={props.onPickAttachment}
+          android_ripple={ripple(theme)}
+          style={[styles.row, { borderColor: theme.line }]}
+          accessibilityRole="button"
+        >
+          <Text style={[styles.text, { color: disabled || busy ? theme.subtle : theme.accent }]}>
+            {busy
+              ? collectionWords.uploadingAttachment
+              : fileId
+                ? collectionWords.replaceFile
+                : collectionWords.chooseFile}
+          </Text>
+          {busy ? <ActivityIndicator size="small" /> : null}
+        </Pressable>
+        {fileId && props.onClearAttachment && !disabled && !busy ? (
+          <Pressable
+            onPress={props.onClearAttachment}
+            android_ripple={ripple(theme)}
+            style={[styles.row, { borderColor: theme.line }]}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.text, { color: theme.danger }]}>{collectionWords.clearValue}</Text>
+          </Pressable>
+        ) : null}
+      </>
+    );
   } else
     control = (
       <TextInput
@@ -157,6 +385,13 @@ export function FieldInput(props: FieldInputProps) {
         <Text style={[styles.error, { color: theme.danger }]} accessibilityRole="alert">
           {error}
         </Text>
+      ) : null}
+      {props.onRetryAttachment ? (
+        <ActionPill
+          label={noticesWords.tryAgain}
+          onPress={props.onRetryAttachment}
+          disabled={disabled}
+        />
       ) : null}
     </View>
   );

@@ -1,10 +1,19 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
 import {
   UnauthorizedError,
   type AccountSession,
   type ResolveAccountSession,
 } from "@dohc/workspace-auth/session";
-import { parseAccountFileWrite, validateAllowedFileWritePath } from "./accountFileWrites";
+import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import {
+  MAX_UPLOAD_FILE_BYTES,
+  parseAccountFileWrite,
+  validateAllowedFileWritePath,
+  validateBinaryUploadPath,
+} from "./accountFileWrites";
 import { liveEditors } from "./liveEditors";
 import { LIVE_ROOM_EDITS } from "./storage/liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./storage/liveRoomPauses";
@@ -227,6 +236,14 @@ describe("owner-only file write authorization and Member 404 isolation", () => {
         [
           "restoreDeletedFile",
           { path: "a.md", objectId: "obj-1", deleteMomentId: "mom-1", requestId: "req-4" },
+        ],
+        [
+          "uploadFile",
+          {
+            path: "photo.png",
+            requestId: "req-5",
+            bytesBase64: Buffer.from("png").toString("base64"),
+          },
         ],
       ];
       for (const [operation, args] of ops) {
@@ -665,5 +682,338 @@ describe("idle service-host enrollment retirement, rebind, and delete cleanup", 
     fenced.release();
     expect(isObjectMutationFenced(storage, doc.workspaceId, doc.objectId)).toBe(false);
     expect(serviceHostDocumentEnabled(storage, doc)).toBe(true);
+  });
+});
+
+describe("binary file upload (uploadFile) and download (fileBytes)", () => {
+  const getBytes = (workspaceId: string, path: string, userId: string, sessionId = "phone") =>
+    new Request(
+      `http://relay.test/sync/${encodeURIComponent(workspaceId)}/ops/fileBytes?path=${encodeURIComponent(path)}`,
+      {
+        method: "GET",
+        headers: { authorization: `Bearer session:${userId}:${sessionId}` },
+      },
+    );
+
+  function seedSyncedFile(
+    storage: StorageContext,
+    workspaceId: string,
+    seq: number,
+    input: { path: string; objectId: string; bytes: Uint8Array; contentKind?: "binary" | "text" },
+  ) {
+    const sha256 = createHash("sha256").update(input.bytes).digest("hex");
+    storage.putBlob({ workspaceId, sha256, content: input.bytes, createdAtMs: 10 + seq });
+    storage.appendLogBatch({
+      workspaceId,
+      originId: "origin-owner",
+      ops: [
+        {
+          originSeq: seq,
+          opKind: "moment.append",
+          recordedAtMs: 10 + seq,
+          payloadJson: JSON.stringify({
+            momentId: `mom-${seq}`,
+            versionId: "main",
+            objectId: input.objectId,
+            operation: "write",
+            path: input.path,
+            payloadAfterPath: input.path,
+            payloadAfterBlobSha256: sha256,
+            payloadAfterContentKind: input.contentKind ?? "binary",
+            payloadAfterByteLength: input.bytes.byteLength,
+            recordedAtMs: 10 + seq,
+          }),
+        },
+      ],
+    });
+  }
+
+  it("validates uploadFile paths and enforces the 5 MiB binary upload cap", () => {
+    expect(validateBinaryUploadPath("photo.png")).toBe("photo.png");
+    expect(validateBinaryUploadPath("docs/invoice.pdf")).toBe("docs/invoice.pdf");
+    const blocked = [
+      "note.md",
+      "Note.MD",
+      "guide.markdown",
+      "board.excalidraw",
+      "collection.yaml",
+      "tasks/collection.yaml",
+      "dataset.json",
+      "tasks/dataset.json",
+      "schema.sql",
+      "operations.js",
+      "automations.yaml",
+      ".dohc/secret.bin",
+      ".env",
+      "docs/.hidden.png",
+      ".dohc-folder",
+      "docs/.dohc-access",
+      "../escape.png",
+      "/abs.png",
+      "CON.png",
+      "bad\x00.png",
+    ];
+    for (const path of blocked) {
+      expect(() => validateBinaryUploadPath(path), path).toThrow();
+    }
+    const exact = Buffer.alloc(MAX_UPLOAD_FILE_BYTES, 7).toString("base64");
+    expect(
+      parseAccountFileWrite("uploadFile", {
+        path: "exact.bin",
+        requestId: "req-max",
+        bytesBase64: exact,
+      }),
+    ).toMatchObject({ operation: "uploadFile", path: "exact.bin" });
+
+    const over = Buffer.alloc(MAX_UPLOAD_FILE_BYTES + 1, 7).toString("base64");
+    expect(() =>
+      parseAccountFileWrite("uploadFile", {
+        path: "over.bin",
+        requestId: "req-over",
+        bytesBase64: over,
+      }),
+    ).toThrow(/5 MiB/u);
+    expect(() =>
+      parseAccountFileWrite("uploadFile", {
+        path: "empty.bin",
+        requestId: "req-empty",
+        bytesBase64: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      parseAccountFileWrite("uploadFile", {
+        path: "bad.bin",
+        requestId: "req-bad",
+        bytesBase64: "AAA",
+      }),
+    ).toThrow();
+  });
+
+  it("uploads PNG/PDF via uploadFile with idempotency, rejects >5 MiB, and downloads byte-for-byte with strict non-executing headers", async () => {
+    const storage = (await testStorage()) as StorageContext;
+    const engine = new VersionedLoopbackEngine();
+    const client = {
+      close() {},
+      onEvent: () => () => undefined,
+      sendRequest: (req: Parameters<VersionedLoopbackEngine["sendRequest"]>[0]) =>
+        engine.sendRequest(req),
+    };
+    const adapter = new VersionedLiveAdapter(client, "trip", { workspaceId: "trip" });
+    await adapter.ensureMainVersion({ workspaceId: "trip" });
+    let seq = 0;
+    const copies = {
+      hold() {},
+      endHold() {},
+      async withServerCopy<T>(
+        _owner: string,
+        _workspaceId: string,
+        _visitor: unknown,
+        work: (replica: unknown) => Promise<T>,
+      ): Promise<T> {
+        const replica = {
+          client,
+          workspace: "trip",
+          async withRecordWork<R>(fn: () => Promise<R>): Promise<R> {
+            return await fn();
+          },
+          async sync() {
+            const listed = await adapter.listTextFileMetadata({
+              workspaceId: "trip",
+              versionId: "main",
+            });
+            for (const entry of listed) {
+              if (
+                storage.objectIdAtPathInVersion({
+                  workspaceId: "trip",
+                  versionId: "main",
+                  path: entry.path,
+                }) === entry.objectId
+              )
+                continue;
+              const bytes = await adapter.readBinaryFile({
+                workspaceId: "trip",
+                versionId: "main",
+                path: entry.path,
+              });
+              if (!bytes) continue;
+              seedSyncedFile(storage, "trip", seq++, {
+                path: entry.path,
+                objectId: entry.objectId,
+                bytes,
+              });
+            }
+          },
+        };
+        return await work(replica);
+      },
+    };
+    const h = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => copies as never,
+    });
+    await claimWorkspace(h, "ana", "trip");
+    storage.claimWorkspaceIdentity({
+      workspaceId: "trip",
+      replicationEpoch: "epoch",
+      streamIdentity: "stream",
+    });
+
+    const pngBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3, 255]);
+    const pdfBytes = new TextEncoder().encode("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n");
+
+    const upPng = await h(
+      postOp("trip", "uploadFile", "ana", {
+        path: "photos/receipt.png",
+        requestId: "req-png-1",
+        bytesBase64: Buffer.from(pngBytes).toString("base64"),
+      }),
+    );
+    expect(upPng.status).toBe(200);
+    const pngResult = (await upPng.json()) as {
+      ok: true;
+      result: { ok: true; path: string; objectId: string };
+    };
+    expect(pngResult.result).toMatchObject({ ok: true, path: "photos/receipt.png" });
+
+    const replayPng = await h(
+      postOp("trip", "uploadFile", "ana", {
+        path: "photos/receipt.png",
+        requestId: "req-png-1",
+        bytesBase64: Buffer.from(pngBytes).toString("base64"),
+      }),
+    );
+    expect(replayPng.status).toBe(200);
+    expect((await replayPng.json()) as { result: { objectId: string } }).toMatchObject({
+      result: { ok: true, path: "photos/receipt.png", objectId: pngResult.result.objectId },
+    });
+
+    const collision = await h(
+      postOp("trip", "uploadFile", "ana", {
+        path: "photos/receipt.png",
+        requestId: "req-png-2",
+        bytesBase64: Buffer.from(pngBytes).toString("base64"),
+      }),
+    );
+    expect(collision.status).toBe(200);
+    expect(await collision.json()).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "path-exists" },
+    });
+
+    const upPdf = await h(
+      postOp("trip", "uploadFile", "ana", {
+        path: "docs/invoice.pdf",
+        requestId: "req-pdf-1",
+        bytesBase64: Buffer.from(pdfBytes).toString("base64"),
+      }),
+    );
+    expect(upPdf.status).toBe(200);
+
+    const overResp = await h(
+      postOp("trip", "uploadFile", "ana", {
+        path: "big.bin",
+        requestId: "req-big",
+        bytesBase64: Buffer.alloc(MAX_UPLOAD_FILE_BYTES + 1, 1).toString("base64"),
+      }),
+    );
+    expect(overResp.status).toBe(413);
+    expect(await overResp.json()).toMatchObject({ ok: false, code: "payload_too_large" });
+
+    const svgBytes = new TextEncoder().encode(
+      '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>',
+    );
+    const htmlBytes = new TextEncoder().encode("<!doctype html><script>alert(1)</script>");
+    seedSyncedFile(storage, "trip", seq++, {
+      path: "docs/icon.svg",
+      objectId: "obj-svg",
+      bytes: svgBytes,
+    });
+    seedSyncedFile(storage, "trip", seq++, {
+      path: "docs/page.html",
+      objectId: "obj-html",
+      bytes: htmlBytes,
+    });
+    seedSyncedFile(storage, "trip", seq++, {
+      path: "private/secret.png",
+      objectId: "obj-priv",
+      bytes: pngBytes,
+    });
+    seedSyncedFile(storage, "trip", seq++, {
+      path: ".env",
+      objectId: "obj-env",
+      bytes: new TextEncoder().encode("SECRET=1"),
+    });
+
+    const hNoCopies = testHandler(storage, {
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => undefined,
+    });
+    for (const [path, expected] of [
+      ["photos/receipt.png", pngBytes],
+      ["docs/invoice.pdf", pdfBytes],
+      ["docs/icon.svg", svgBytes],
+      ["docs/page.html", htmlBytes],
+    ] as const) {
+      const resp = await hNoCopies(getBytes("trip", path, "ana"));
+      expect(resp.status, path).toBe(200);
+      expect(resp.headers.get("content-type"), path).toBe("application/octet-stream");
+      expect(resp.headers.get("x-content-type-options"), path).toBe("nosniff");
+      expect(resp.headers.get("cache-control"), path).toBe("private, no-store");
+      expect(new Uint8Array(await resp.arrayBuffer())).toEqual(expected);
+    }
+
+    expect((await hNoCopies(getBytes("trip", ".env", "ana"))).status).toBe(404);
+
+    expect(
+      storage.inviteWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        workspaceName: "Lisbon",
+        email: "ben@dohc.test",
+        recipientUserId: "ben",
+        newMemberId: () => "member-ben",
+        newGrantId: () => "grant-ben",
+        newShareId: () => "share-trip",
+        nowMs: 100,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      storage.changeFolderRule({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        change: {
+          kind: "create",
+          folder: "private",
+          rule: parseAccessRule("people:\n  cara@dohc.test: edit\n")!,
+        },
+        nowMs: 101,
+      }),
+    ).toMatchObject({ ok: true });
+    seedSyncedFile(storage, "trip", seq++, {
+      path: "private/.dohc-access",
+      objectId: "obj-access",
+      bytes: new TextEncoder().encode("people:\n  cara@dohc.test: edit\n"),
+      contentKind: "text",
+    });
+
+    const memberAllowed = await hNoCopies(getBytes("trip", "docs/invoice.pdf", "ben"));
+    expect(memberAllowed.status).toBe(200);
+    expect(memberAllowed.headers.get("content-type")).toBe("application/octet-stream");
+    expect(new Uint8Array(await memberAllowed.arrayBuffer())).toEqual(pdfBytes);
+
+    expect((await hNoCopies(getBytes("trip", "private/secret.png", "ben"))).status).toBe(404);
+    expect((await hNoCopies(getBytes("trip", ".env", "ben"))).status).toBe(404);
+    expect((await hNoCopies(getBytes("trip", "private/.dohc-access", "ben"))).status).toBe(404);
+    expect(
+      (
+        await h(
+          postOp("trip", "uploadFile", "ben", {
+            path: "docs/member.png",
+            requestId: "req-mem",
+            bytesBase64: Buffer.from(pngBytes).toString("base64"),
+          }),
+        )
+      ).status,
+    ).toBe(404);
   });
 });
