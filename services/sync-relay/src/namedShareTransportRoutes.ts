@@ -19,9 +19,9 @@ import {
   assertClientLogProvenance,
   MESSAGE_TOMBSTONE_OP_KIND,
   namedShareOrigin,
-  parseNamedShareLogOps,
   type LogAuthorNameLookup,
 } from "./relayLogInputs";
+import { prepareNamedShareAppendOps } from "./namedRecipientChat";
 import {
   assertSha256,
   parseCursor,
@@ -33,14 +33,11 @@ import {
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
-  chatSideOf,
   fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
   type AnyShareSelector,
-  type ChatShareThreadResolver,
-  type ThreadFileBinding,
 } from "./shareFilter";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import type { createShareReadQueries } from "./shareReadQueries";
@@ -481,99 +478,14 @@ export function createNamedShareTransportRoutes(
       // freezes a payload whose claimed author is missing or forged.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops);
-      // Batch-aware channel scoping: a thread created earlier in this batch
-      // is a valid target for later ops in the same batch (the composer's
-      // thread.create + first message.append), but the log's earliest
-      // binding always wins over the batch — a batch cannot re-bind an
-      // existing thread.
-      const pendingThreadBindings = new Map<string, string>();
-      // The path sibling of the same rule, for a file share. A
-      // recipient's `chat.thread.create` names the granted PATH (its own
-      // object ids mean nothing here), and the message it composes with
-      // rides in the same batch.
-      const pendingThreadFiles = new Map<string, ThreadFileBinding>();
-      const resolver: ChatShareThreadResolver = {
-        channelKind: (channelWireId) =>
-          storage.findChannelCreateKind(share.workspaceId, channelWireId),
-        threadChannelWireId: (threadId) => {
-          const stored = storage.findThreadCreateChannelWireId(share.workspaceId, threadId);
-          return stored !== undefined ? stored : pendingThreadBindings.get(threadId);
-        },
-        threadFileBinding: (threadId) => {
-          const stored = storage.findThreadCreateFileBinding(share.workspaceId, threadId);
-          return stored !== undefined ? stored : pendingThreadFiles.get(threadId);
-        },
-        objectCurrentPath: (objectId) => storage.objectCurrentPath(share.workspaceId, objectId),
-        objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
-        messageDeleted: (threadId, messageId) =>
-          storage.messageDeleted(share.workspaceId, threadId, messageId),
-      };
-      const ops = await parseNamedShareLogOps(input.ops, actor.userId, lookupUserDisplayName);
-      for (const op of ops) {
-        // The write filter, never the read one: what a recipient may see is
-        // not what it may push into the granter's log.
-        const decision = filterOpForShareAppend(
-          share.selector,
-          op.opKind,
-          op.payloadJson,
-          resolver,
-        );
-        if (!decision.allowed) throw relayError("share_op_rejected");
-        // Persist the filter's (possibly redacted) copy, never the pusher's
-        // original bytes: the owner bucket is read back over the UNfiltered
-        // owner lane, so any field the filter withholds (e.g. a member
-        // attachment's objectId/pathHint) must not survive the append.
-        op.payloadJson = JSON.stringify(decision.payload);
-        if (op.opKind === "chat.thread.create") {
-          // Read back from the served copy assigned above, which carries the
-          // path this relay proved — never the pusher's own string.
-          const created = JSON.parse(op.payloadJson) as {
-            threadId?: unknown;
-            channelWireId?: unknown;
-            linkedPath?: unknown;
-          };
-          const threadId = created.threadId;
-          // A workspace share's thread sits in the Group the filter just
-          // admitted, or on a file when it names none.
-          const boundChannel = isWorkspaceSelector(share.selector)
-            ? typeof created.channelWireId === "string"
-              ? created.channelWireId
-              : null
-            : (chatSideOf(share.selector)?.channelWireId ?? null);
-          if (typeof threadId === "string" && threadId.length > 0) {
-            if (boundChannel !== null) {
-              pendingThreadBindings.set(threadId, boundChannel);
-            } else if (typeof created.linkedPath === "string" && created.linkedPath.length > 0) {
-              // The accept door converts the binding.
-              //
-              // A recipient names its file by path because its own object
-              // ids mean nothing here. This is the one moment the relay can
-              // turn that into the granter's own object id: the filter just
-              // proved an object sits at this exact path. Persisting the
-              // object id instead of the path is what makes a recipient's
-              // thread behave like the granter's — it follows the file
-              // through a rename inside the share, and stops at one that
-              // leaves it, because both answers come from the same
-              // object→path lookup.
-              //
-              // Rewriting a payload before persisting is what this route
-              // already does: the served copy above is a redaction, and the
-              // path in it was normalized by the filter.
-              const objectId = storage.objectIdAtPath(share.workspaceId, created.linkedPath);
-              // The filter admitted this op by proving an object is there,
-              // so this is unreachable through the filter's own path. A
-              // batch that reaches it is refused whole rather than stored as
-              // a thread bound to nothing.
-              if (!objectId) throw relayError("share_op_rejected");
-              const bound: Record<string, unknown> = { ...created };
-              delete bound.linkedPath;
-              bound.linkedObjectId = objectId;
-              op.payloadJson = JSON.stringify(bound);
-              pendingThreadFiles.set(threadId, { kind: "object", objectId });
-            }
-          }
-        }
-      }
+      const { ops, resolver } = await prepareNamedShareAppendOps(
+        storage,
+        share.workspaceId,
+        share.selector,
+        input.ops,
+        actor.userId,
+        lookupUserDisplayName,
+      );
       if (refreshMentionAccountNames) {
         const mentionBodies = chatMentionBodies(ops);
         if (mentionBodies.length > 0)

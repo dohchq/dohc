@@ -447,7 +447,12 @@ export function createAccountOperationRoute(options: {
           )
             throw notFound();
           const fresh = phoneMember(storage, route.workspaceId, caller.userId);
-          if (fresh === null || fresh.shareId !== member.shareId) throw notFound();
+          if (
+            fresh === null ||
+            fresh.shareId !== member.shareId ||
+            fresh.grantId !== member.grantId
+          )
+            throw notFound();
           if (
             !workspaceGroupReachable(fresh.selector, channelWireId, {
               channelKind: (wireId) => storage.findChannelCreateKind(route.workspaceId, wireId),
@@ -458,10 +463,16 @@ export function createAccountOperationRoute(options: {
                 ? `no such group: ${channelWireId}`
                 : `chat thread not found: ${parsed.args.threadId}`,
             );
+          if (action === "read") {
+            return {
+              share: { shareId: fresh.shareId, workspaceId: route.workspaceId },
+              effectiveSelector: fresh.selector,
+            };
+          }
           const granted = authorizeShareGrantAction({
             storage,
             grantId: fresh.grantId,
-            action,
+            action: "append",
             principal: { kind: "user", userId: caller.userId },
           });
           if (!granted.ok)
@@ -472,17 +483,15 @@ export function createAccountOperationRoute(options: {
             !isWorkspaceSelector(granted.effectiveSelector)
           )
             throw notFound();
-          if (action === "append") {
-            if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
-              throw relayError("share_read_only");
-            if (
-              parsed.operation === "post" &&
-              storage
-                .listChannelCreates(route.workspaceId)
-                .find((group) => group.channelWireId === channelWireId)?.type === "chat"
-            )
-              throw relayError("share_op_rejected");
-          }
+          if (workspaceChatAccess(granted.effectiveSelector, channelWireId) !== "read-write")
+            throw relayError("share_read_only");
+          if (
+            parsed.operation === "post" &&
+            storage
+              .listChannelCreates(route.workspaceId)
+              .find((group) => group.channelWireId === channelWireId)?.type === "chat"
+          )
+            throw relayError("share_op_rejected");
           return {
             share: { shareId: granted.share.shareId, workspaceId: granted.share.workspaceId },
             effectiveSelector: granted.effectiveSelector,

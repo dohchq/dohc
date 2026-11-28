@@ -1,4 +1,5 @@
 import { MAX_NAMED_CHAT_FOLLOW_REQUESTS } from "@dohc/security-contract/share-discussion";
+import { CHAT_FILE_LINK_WITHHELD } from "@dohc/workspace-contracts/chat-mentions";
 import { jsonResponse, readBoundedJson } from "@dohc/service-http";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
@@ -54,6 +55,7 @@ import {
   withheldLinkText,
   type AnyShareSelector,
   type ChatShareThreadResolver,
+  type ShareSelector,
   type ThreadFileBinding,
 } from "./shareFilter";
 import type { createShareReadQueries } from "./shareReadQueries";
@@ -333,6 +335,86 @@ export interface AppendNamedChatMessageInput {
 const fileReachOf = (selector: AnyShareSelector) =>
   isWorkspaceSelector(selector) ? workspaceFileReach(selector) : null;
 
+function redactBounded(
+  raw: string,
+  files: ShareSelector | null,
+  fits: (text: string) => boolean,
+): string {
+  const redacted = withheldLinkText(raw, files);
+  if (fits(redacted)) return redacted;
+  const shorter = redacted.replaceAll(CHAT_FILE_LINK_WITHHELD, "(hidden)");
+  return fits(shorter) ? shorter : redacted.replaceAll(CHAT_FILE_LINK_WITHHELD, "--");
+}
+
+export type ShareAppendStorage = Pick<
+  SyncRelayStorage,
+  | "findChannelCreateKind"
+  | "findThreadCreateChannelWireId"
+  | "findThreadCreateFileBinding"
+  | "objectCurrentPath"
+  | "objectIdAtPath"
+  | "messageDeleted"
+>;
+
+/** Parses, filters, and resolves batch-local thread bindings for a named-share log append. */
+export async function prepareNamedShareAppendOps(
+  storage: ShareAppendStorage,
+  workspaceId: string,
+  selector: AnyShareSelector,
+  rawOps: unknown[],
+  userId: string,
+  lookupUserDisplayName?: LogAuthorNameLookup,
+): Promise<{
+  ops: Awaited<ReturnType<typeof parseNamedShareLogOps>>;
+  resolver: ChatShareThreadResolver;
+}> {
+  const pendingThreadBindings = new Map<string, string>();
+  const pendingThreadFiles = new Map<string, ThreadFileBinding>();
+  const resolver: ChatShareThreadResolver = {
+    channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+    threadChannelWireId: (tid) => {
+      const stored = storage.findThreadCreateChannelWireId(workspaceId, tid);
+      return stored !== undefined ? stored : pendingThreadBindings.get(tid);
+    },
+    threadFileBinding: (tid) => {
+      const stored = storage.findThreadCreateFileBinding(workspaceId, tid);
+      return stored !== undefined ? stored : pendingThreadFiles.get(tid);
+    },
+    objectCurrentPath: (objectId) => storage.objectCurrentPath(workspaceId, objectId),
+    objectIdAtPath: (path) => storage.objectIdAtPath(workspaceId, path),
+    messageDeleted: (tid, msgId) => storage.messageDeleted(workspaceId, tid, msgId),
+  };
+  const ops = await parseNamedShareLogOps(rawOps, userId, lookupUserDisplayName);
+  for (const op of ops) {
+    const decision = filterOpForShareAppend(selector, op.opKind, op.payloadJson, resolver);
+    if (!decision.allowed) throw relayError("share_op_rejected");
+    op.payloadJson = JSON.stringify(decision.payload);
+    if (op.opKind !== "chat.thread.create") continue;
+    const created = decision.payload as {
+      threadId?: unknown;
+      channelWireId?: unknown;
+      linkedPath?: unknown;
+    };
+    const tid = created.threadId;
+    const boundChannel = isWorkspaceSelector(selector)
+      ? typeof created.channelWireId === "string"
+        ? created.channelWireId
+        : null
+      : (chatSideOf(selector)?.channelWireId ?? null);
+    if (typeof tid !== "string" || !tid) continue;
+    if (boundChannel !== null) {
+      pendingThreadBindings.set(tid, boundChannel);
+    } else if (typeof created.linkedPath === "string" && created.linkedPath) {
+      const objectId = storage.objectIdAtPath(workspaceId, created.linkedPath);
+      if (!objectId) throw relayError("share_op_rejected");
+      const { linkedPath: _removed, ...rest } = created;
+      op.payloadJson = JSON.stringify({ ...rest, linkedObjectId: objectId });
+      pendingThreadFiles.set(tid, { kind: "object", objectId });
+    }
+  }
+  return { ops, resolver };
+}
+
 /** Authorizes and appends one named-share chat post or reply directly into the workspace's named share log. */
 export async function appendNamedChatMessage(input: AppendNamedChatMessageInput): Promise<{
   threadId: string;
@@ -461,11 +543,17 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   const redactFiles =
     input.redactFileLinks && !owned ? fileReachOf(authorized.effectiveSelector) : undefined;
   if (redactFiles !== undefined) {
-    body = withheldLinkText(body, redactFiles);
-    if (!body || Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) throw badRequest("invalid body");
+    body = redactBounded(
+      body,
+      redactFiles,
+      (text) => Buffer.byteLength(text) <= MAX_MESSAGE_BODY_BYTES,
+    );
     if (threadTitle) {
-      threadTitle = withheldLinkText(threadTitle, redactFiles).trim();
-      if (threadTitle.length > MAX_THREAD_TITLE_UNITS) throw badRequest("invalid title");
+      threadTitle = redactBounded(
+        threadTitle,
+        redactFiles,
+        (text) => text.length <= MAX_THREAD_TITLE_UNITS,
+      );
     }
   }
   let wakes: BrowserPostWakes | undefined;
@@ -529,51 +617,14 @@ export async function appendNamedChatMessage(input: AppendNamedChatMessageInput)
   input.checkDraft?.(draft && threaded(draft, draftPayload, threadLane, createThread));
   assertChatAuthorship(rawOps, userId);
   assertClientLogProvenance(originId, rawOps);
-  let pendingChannel: string | undefined;
-  let pendingFile: ThreadFileBinding | undefined;
-  const resolver: ChatShareThreadResolver = {
-    channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
-    threadChannelWireId: (tid) =>
-      storage.findThreadCreateChannelWireId(workspaceId, tid) ??
-      (tid === threadId ? pendingChannel : undefined),
-    threadFileBinding: (tid) =>
-      storage.findThreadCreateFileBinding(workspaceId, tid) ??
-      (tid === threadId ? pendingFile : undefined),
-    objectCurrentPath: (objectId) => storage.objectCurrentPath(workspaceId, objectId),
-    objectIdAtPath: (path) => storage.objectIdAtPath(workspaceId, path),
-    messageDeleted: (tid, msgId) => storage.messageDeleted(workspaceId, tid, msgId),
-  };
-  const ops = await parseNamedShareLogOps(rawOps, userId, () => rawAccountName);
-  for (const op of ops) {
-    const decision = filterOpForShareAppend(
-      authorized.effectiveSelector,
-      op.opKind,
-      op.payloadJson,
-      resolver,
-    );
-    if (!decision.allowed) throw relayError("share_op_rejected");
-    op.payloadJson = JSON.stringify(decision.payload);
-    if (op.opKind !== "chat.thread.create") continue;
-    const created = decision.payload as {
-      threadId?: unknown;
-      channelWireId?: unknown;
-      linkedPath?: unknown;
-    };
-    const boundChannel = isWorkspaceSelector(authorized.effectiveSelector)
-      ? typeof created.channelWireId === "string"
-        ? created.channelWireId
-        : null
-      : (chatSideOf(authorized.effectiveSelector)?.channelWireId ?? null);
-    if (boundChannel !== null) {
-      pendingChannel = boundChannel;
-    } else if (typeof created.linkedPath === "string" && created.linkedPath) {
-      const objectId = storage.objectIdAtPath(workspaceId, created.linkedPath);
-      if (!objectId) throw relayError("share_op_rejected");
-      const { linkedPath: _removed, ...rest } = created;
-      op.payloadJson = JSON.stringify({ ...rest, linkedObjectId: objectId });
-      pendingFile = { kind: "object", objectId };
-    }
-  }
+  const { ops, resolver } = await prepareNamedShareAppendOps(
+    storage,
+    workspaceId,
+    authorized.effectiveSelector,
+    rawOps,
+    userId,
+    () => rawAccountName,
+  );
   const mentionBodies = input.refreshMentionAccountNames ? chatMentionBodies(ops) : [];
   if (mentionBodies.length > 0) {
     await input.refreshMentionAccountNames!(workspaceId, mentionBodies);

@@ -91,14 +91,18 @@ export function memberChatAnswer<Answer>(
     if (value !== null && typeof value === "object") {
       const record = value as Record<string, unknown>;
       const entries = Object.entries(record).map(([name, item]) => [name, served(item, name)]);
-      if (record.kind === "group" && typeof record.channelWireId === "string") {
+      if (
+        channelTypes !== null &&
+        record.kind === "group" &&
+        typeof record.channelWireId === "string"
+      ) {
         entries.push([
           "access",
           member.selector.reach.groupLevel(record.channelWireId) === null
             ? "read-only"
             : workspaceChatAccess(member.selector, record.channelWireId),
         ]);
-        const type = channelTypes?.get(record.channelWireId);
+        const type = channelTypes.get(record.channelWireId);
         if (type !== undefined) entries.push(["type", type]);
       }
       return Object.fromEntries(entries);

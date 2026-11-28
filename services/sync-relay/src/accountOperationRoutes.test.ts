@@ -5066,4 +5066,140 @@ describe("a Member's phone reads in a workspace they joined", () => {
     });
     expect(countRows()).toBe(beforeReplies);
   });
+
+  it("preserves authoritative file-thread bindings, pins grantId across re-invites, and keeps redacted titles and bodies within size limits", async () => {
+    // B1: a Group post whose derived thread ID collides with an existing file-comment thread must be refused.
+    const f1 = await joinedChat({ copies: false });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
+    const derivedThreadId = `browser-thread:${sha256Hex(
+      JSON.stringify(["share-trip", "ben", "op-file-collision"]),
+    )}`;
+    f1.storage.appendLogBatch({
+      workspaceId: "trip",
+      originId: "owner-file-thread",
+      ops: [
+        {
+          originSeq: 0,
+          opKind: "chat.thread.create",
+          payloadJson: JSON.stringify({
+            threadId: derivedThreadId,
+            title: "Plan notes",
+            linkedObjectId: "object-plan",
+            linkedPath: "docs/plan.md",
+            linkedAtMs: 3,
+            createdAtMs: 3,
+          }),
+          recordedAtMs: 3,
+        },
+      ],
+    });
+    expect(
+      await json(
+        await f1.h(
+          op(
+            "trip",
+            "post",
+            {
+              operationId: "op-file-collision",
+              groupId: f1.planningWire,
+              body: "Should not land on file thread",
+            },
+            asBen,
+          ),
+        ),
+      ),
+    ).toMatchObject({
+      ok: true,
+      result: { ok: false, refusal: "refused", reason: "Couldn't send" },
+    });
+    expect(
+      f1.storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin),
+    ).toHaveLength(0);
+
+    // B2: an in-flight write held across remove + re-invite with a new grantId must fail 404.
+    let releaseLookup: (() => void) | undefined;
+    let enteredLookup: (() => void) | undefined;
+    const f2 = await joinedChat({
+      copies: false,
+      lookupUserDisplayName: async () => {
+        if (enteredLookup) {
+          enteredLookup();
+          await new Promise<void>((resolve) => {
+            releaseLookup = resolve;
+          });
+        }
+        return "Ben";
+      },
+    });
+    const waitReinvite = new Promise<void>((resolve) => {
+      enteredLookup = resolve;
+    });
+    const writing = f2.h(
+      op(
+        "trip",
+        "post",
+        { operationId: "op-reinvite", groupId: f2.planningWire, body: "Stale grant" },
+        asBen,
+      ),
+    );
+    await waitReinvite;
+    expect(
+      f2.storage.removeWorkspaceMember({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        nowMs: 20,
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      f2.storage.letWorkspaceMemberBackIn({
+        workspaceId: "trip",
+        actorUserId: "ana",
+        memberId: "member-ben",
+        newGrantId: () => "grant-ben-2",
+        nowMs: 21,
+      }),
+    ).toMatchObject({ ok: true });
+    enteredLookup = undefined;
+    releaseLookup!();
+    expect((await writing).status).toBe(404);
+    expect(
+      f2.storage
+        .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+        .rows.filter((row) => row.originId === memberOrigin),
+    ).toHaveLength(0);
+
+    // B3: redaction that would expand a valid title past 200 units or body past 64 KiB uses compact placeholder and saves.
+    const crowdedTitle = `${"@[private/a] ".repeat(9)}Trip plan`;
+    expect(crowdedTitle.length).toBeLessThanOrEqual(200);
+    const crowdedBody = `${"@[private/x] ".repeat(4_500)}done`;
+    expect(Buffer.byteLength(crowdedBody)).toBeLessThanOrEqual(64 * 1024);
+    const res = await f1.h(
+      op(
+        "trip",
+        "post",
+        {
+          operationId: "op-b3-bounded",
+          groupId: f1.planningWire,
+          title: crowdedTitle,
+          body: crowdedBody,
+        },
+        asBen,
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(await json(res)).toMatchObject({ ok: true, result: { ok: true, state: "saved" } });
+    const rows = f1.storage
+      .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
+      .rows.filter((row) => row.originId === memberOrigin);
+    expect(rows).toHaveLength(2);
+    const createdTitle = (JSON.parse(rows[0]!.payloadJson) as { title: string }).title;
+    const savedBody = (JSON.parse(rows[1]!.payloadJson) as { body: string }).body;
+    expect(createdTitle.length).toBeLessThanOrEqual(200);
+    expect(createdTitle).not.toContain("@[");
+    expect(Buffer.byteLength(savedBody)).toBeLessThanOrEqual(64 * 1024);
+    expect(savedBody).not.toContain("@[");
+  });
 });

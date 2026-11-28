@@ -214,7 +214,9 @@ export async function runAccountOperation(
             ? memberChatAnswer(
                 input.member,
                 read,
-                server.storage.listChannelCreates(input.workspaceId),
+                request.operation === "groupsFull"
+                  ? server.storage.listChannelCreates(input.workspaceId)
+                  : undefined,
               )
             : request.operation === "groupsFull" && input.visitor.phone && input.member === null
               ? phoneGroups(

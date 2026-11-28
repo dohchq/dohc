@@ -623,7 +623,7 @@ function WritableThread({
   const chats = chatsState.value;
   const group = chats?.find((each) => each.threadIds.includes(threadId)) ?? null;
   const phase = useEnsureThreadListed(
-    threadId,
+    joined ? null : threadId,
     chats,
     group !== null,
     chatsState.loading,
@@ -813,7 +813,6 @@ function Stream({
     [chats],
   );
   useEffect(() => {
-    if (data?.joined) return;
     const lane = (which: "posts" | "chat") =>
       stream?.items.filter((item) => item.lane === which).map((item) => item.message) ?? null;
     markShown(data, lane("chat"), visible);
@@ -928,10 +927,11 @@ function Thread({
       ),
     [],
   );
-  useEffect(() => {
-    if (data?.joined) return;
-    markShown(data, thread ? shownMessages(thread.messages, messageId, onScreen) : null, visible);
-  }, [data, thread, messageId, onScreen, visible]);
+  useEffect(
+    () =>
+      markShown(data, thread ? shownMessages(thread.messages, messageId, onScreen) : null, visible),
+    [data, thread, messageId, onScreen, visible],
+  );
   const bases = useMemo(
     () => thread?.messages.map((entry) => serverMessage(entry, null, workspaceMarkFills)) ?? null,
     [thread],
