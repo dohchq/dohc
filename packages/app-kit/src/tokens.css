@@ -1,22 +1,24 @@
 :root {
   --kit-bg: #faf9f5;
-  --kit-panel: #f3f1ea;
-  --kit-panel-2: #ebe8e0;
+  --kit-panel: #fffefa;
+  --kit-panel-2: #efede6;
   --kit-line: #e4e1d8;
+  --kit-line-strong: color-mix(in srgb, var(--kit-ink) 52%, var(--kit-panel));
   --kit-ink: #1c1b18;
   --kit-muted: #55524a;
-  --kit-subtle: #7f7b6e;
+  --kit-subtle: #6e6a5f;
   --kit-accent: #2d342e;
   --kit-on-accent: #faf9f5;
-  --kit-focus: color-mix(in srgb, var(--kit-accent) 60%, transparent);
+  --kit-focus: color-mix(in srgb, var(--kit-accent) 65%, transparent);
   --kit-hover: color-mix(in srgb, var(--kit-ink) 7%, transparent);
   --kit-selected: color-mix(in srgb, var(--kit-ink) 14%, transparent);
   --kit-skeleton: color-mix(in srgb, var(--kit-ink) 11%, transparent);
   --kit-scrim: rgba(0, 0, 0, 0.4);
-  --kit-success: #38684e;
-  --kit-warning: #855f1e;
-  --kit-danger: #9d3c28;
-  --kit-danger-fill: #9d3c28;
+  --kit-info: #23528c;
+  --kit-success: #2d5e43;
+  --kit-warning: #785314;
+  --kit-danger: #9a3421;
+  --kit-danger-fill: #9a3421;
   --kit-on-danger: #faf9f5;
   --kit-chart-1: #22645a;
   --kit-chart-2: #285884;
@@ -26,6 +28,9 @@
   --kit-chart-6: #764580;
   --kit-radius: 10px;
   --kit-radius-sm: 6px;
+  --kit-radius-lg: 14px;
+  --kit-shadow-sm: 0 1px 2px rgba(28, 27, 24, 0.05), 0 1px 1px rgba(28, 27, 24, 0.025);
+  --kit-shadow-lg: 0 4px 12px rgba(28, 27, 24, 0.08), 0 18px 40px rgba(28, 27, 24, 0.12);
   --kit-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --kit-font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
@@ -33,19 +38,21 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --kit-bg: #131211;
-    --kit-panel: #181715;
-    --kit-panel-2: #201f1c;
-    --kit-line: #2a2925;
+    --kit-panel: #1b1a18;
+    --kit-panel-2: #24221f;
+    --kit-line: #2c2a26;
+    --kit-line-strong: color-mix(in srgb, var(--kit-ink) 40%, var(--kit-panel));
     --kit-ink: #f6f4ee;
     --kit-muted: #aba79b;
-    --kit-subtle: #7d7a6e;
+    --kit-subtle: #878377;
     --kit-accent: #d7d0c0;
     --kit-on-accent: #131211;
-    --kit-focus: color-mix(in srgb, var(--kit-accent) 50%, transparent);
+    --kit-focus: color-mix(in srgb, var(--kit-accent) 58%, transparent);
     --kit-scrim: rgba(0, 0, 0, 0.65);
+    --kit-info: #8ab8eb;
     --kit-success: #82c29b;
-    --kit-warning: #d9a94e;
-    --kit-danger: #e1866c;
+    --kit-warning: #e2b458;
+    --kit-danger: #eb9178;
     --kit-danger-fill: #b04530;
     --kit-on-danger: #f6f4ee;
     --kit-chart-1: #82c9bb;
@@ -54,6 +61,8 @@
     --kit-chart-4: #dc9378;
     --kit-chart-5: #a7abee;
     --kit-chart-6: #d09fd9;
+    --kit-shadow-sm: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 1px 2px rgba(0, 0, 0, 0.3);
+    --kit-shadow-lg: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 28px rgba(0, 0, 0, 0.48);
   }
 }
 
@@ -87,7 +96,7 @@
 }
 
 .kit-chart-axis {
-  font-size: 12px;
+  font-size: 11.5px;
   fill: var(--kit-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -95,11 +104,17 @@
 .kit-chart-grid {
   stroke: var(--kit-line);
   stroke-width: 1;
+  stroke-dasharray: 3 3;
 }
 
 .kit-chart-zero {
   stroke: var(--kit-subtle);
   stroke-width: 1;
+  opacity: 0.6;
+}
+
+.kit-chart-hover-band {
+  fill: var(--kit-hover);
 }
 
 .kit-chart-legend {
@@ -119,9 +134,9 @@
 }
 
 .kit-chart-swatch {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
   flex-shrink: 0;
 }
 
@@ -129,16 +144,29 @@
   position: absolute;
   pointer-events: none;
   z-index: 10;
-  background: var(--kit-bg);
+  background: var(--kit-panel);
   color: var(--kit-ink);
   border: 1px solid var(--kit-line);
-  border-radius: var(--kit-radius-sm);
-  padding: 6px 9px;
+  border-radius: 8px;
+  padding: 8px 10px;
   font-size: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--kit-shadow-lg);
   font-variant-numeric: tabular-nums;
   max-width: min(240px, calc(100% - 16px));
   overflow-wrap: break-word;
+}
+
+.kit-chart-tooltip > strong {
+  display: block;
+  color: var(--kit-muted);
+  padding-bottom: 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--kit-line);
+}
+
+.kit-chart-tooltip .kit-chart-legend-item {
+  display: flex;
+  line-height: 1.5;
 }
 
 .kit-donut-layout {
@@ -152,7 +180,7 @@
   flex: 1 1 180px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .kit-donut-row {
@@ -161,12 +189,24 @@
   justify-content: space-between;
   gap: 10px;
   font-size: 13px;
-  padding: 4px 6px;
+  padding: 4px 8px;
   border-radius: var(--kit-radius-sm);
 }
 
 .kit-donut-row-active {
   background: var(--kit-hover);
+}
+
+.kit-donut-meta {
+  display: inline-flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kit-donut-share {
+  color: var(--kit-muted);
+  min-width: 3ch;
+  text-align: right;
 }
 
 .kit-chart-empty {
