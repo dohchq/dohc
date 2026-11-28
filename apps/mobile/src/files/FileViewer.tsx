@@ -136,18 +136,16 @@ export function FileViewerScreen() {
       try {
         if (Platform.OS === "ios") {
           await Share.share({ url: loaded.uri, title });
+        } else if (loaded.preview.kind === "pdf") {
+          await loaded.file.preview({ title, mimeType: "application/pdf" });
         } else {
-          const mimeType =
-            loaded.preview.kind === "pdf"
-              ? "application/pdf"
-              : loaded.preview.kind === "text"
-                ? "text/plain"
-                : undefined;
           try {
-            await loaded.file.preview({ title, ...(mimeType ? { mimeType } : {}) });
+            await loaded.file.preview({ title });
           } catch {
-            if (mimeType) throw new Error("preview failed");
-            await loaded.file.preview({ title, mimeType: "application/octet-stream" });
+            await loaded.file.preview({
+              title,
+              mimeType: loaded.preview.kind === "text" ? "text/plain" : "application/octet-stream",
+            });
           }
         }
       } catch {

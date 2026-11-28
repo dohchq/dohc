@@ -8,7 +8,7 @@ import { memoryStore, serveSessionEnd, testServer } from "./testServer";
 const files = new Map<string, Uint8Array>();
 const dirs = new Set<string>();
 const deletedDirs: string[] = [];
-let beforeFileWrite: (() => void) | null = null;
+let beforeFileWrite: ((uri: string, bytes: Uint8Array) => void) | null = null;
 let mockFileSizeOverride: number | undefined;
 let bytesReadCount = 0;
 
@@ -26,7 +26,7 @@ vi.mock("expo-file-system", () => {
       return mockFileSizeOverride ?? files.get(this.uri)?.byteLength ?? 0;
     }
     async write(bytes: Uint8Array) {
-      beforeFileWrite?.();
+      beforeFileWrite?.(this.uri, bytes);
       files.set(this.uri, new Uint8Array(bytes));
     }
     async bytes() {
@@ -254,6 +254,18 @@ describe("binary cache hygiene on Sign out and sign-in changes", () => {
     };
     const raced = await writeCachedBinary("secret.pdf", new Uint8Array([9, 9, 9]));
     expect(raced).toBeNull();
+    expect(files.size).toBe(0);
+
+    beforeFileWrite = (uri) => {
+      beforeFileWrite = null;
+      clearBinaryFileCache();
+      dirs.add(`file:///cache/${BINARY_CACHE_DIR}`);
+      files.set(uri, new Uint8Array([9]));
+      throw new Error("ENOSPC");
+    };
+    await expect(writeCachedBinary("partial.pdf", new Uint8Array([9, 9, 9]))).rejects.toThrow(
+      "ENOSPC",
+    );
     expect(files.size).toBe(0);
   });
 

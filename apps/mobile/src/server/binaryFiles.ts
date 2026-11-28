@@ -128,7 +128,14 @@ export async function writeCachedBinary(
     dir,
     `${newFileRequestId()}${/^[a-z0-9]{1,10}$/.test(ext) ? `.${ext}` : ""}`,
   );
-  await file.write(bytes);
+  try {
+    await file.write(bytes);
+  } catch (error) {
+    try {
+      if (file.exists) file.delete();
+    } catch {}
+    throw error;
+  }
   if (cacheGeneration !== gen) {
     try {
       if (file.exists) file.delete();

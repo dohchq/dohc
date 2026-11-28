@@ -151,10 +151,8 @@ export function ServerHome() {
     } catch (error) {
       if (controller.signal.aborted || !signIn.isCurrent() || !data.isOpen()) return;
       const problem = shownProblem(error);
-      if (problem === "refused") {
-        uploadAttempt.current = null;
-        showToast({ tone: "failure", title: workspaceWords.fileUploadFailed });
-      } else if (problem !== null) {
+      if (problem !== null) {
+        if (problem === "refused") uploadAttempt.current = null;
         setUploadFailure((prev) => ({ problem, failures: prev.failures + 1 }));
       }
     } finally {
@@ -166,7 +164,7 @@ export function ServerHome() {
     `upload:${data?.workspaceId ?? "none"}:file`,
     workspaceWords.fileUploadFailed,
     uploadFailure,
-    () => void sendUpload(),
+    uploadFailure.problem === "refused" ? null : () => void sendUpload(),
   );
   const startUploadFile = useCallback(async () => {
     if (!data || !canEditFiles || uploadingFile || pickingFile.current) return;
