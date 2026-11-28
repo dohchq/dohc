@@ -609,6 +609,15 @@ describe("converting a note once its editor closes", () => {
     await expect(closing(conversion, "a.md", { converted: 1 }).done).resolves.toBeNull();
   });
 
+  it("sends no live list when the workspace has no relay", async () => {
+    const conversion = await afterRun([skippedAs("a", "open-here")]);
+    const convert = vi.fn(async (_params: Params) => pass({ converted: 1 }));
+    await conversion.closed("ws", "a.md", (use) =>
+      use({ relay: null, convert, assertCurrent: () => undefined }),
+    );
+    expect(convert).toHaveBeenCalledExactlyOnceWith({ objectId: "a", budget: 1 });
+  });
+
   it("says the workspace is not drained when the push after the conversion fails", async () => {
     const conversion = await afterRun([skippedAs("a", "open-here")]);
     let pushes = 0;
