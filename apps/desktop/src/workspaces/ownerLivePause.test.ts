@@ -67,7 +67,9 @@ function fixture() {
         return { paused: { ...stop } };
       },
     ),
-    ownerYDocStopList: vi.fn(async () => (stop ? [{ document, paused: { ...stop } }] : [])),
+    ownerYDocStopList: vi.fn(async () =>
+      stop ? [{ document, binding, paused: { ...stop } }] : [],
+    ),
     ownerYDocStopClear: vi.fn(async () => {
       stop = null;
       return [];
@@ -425,6 +427,21 @@ describe("settleOwnerLivePauses", () => {
       expect.anything(),
     );
     expect(f.relay.copyWritten).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Partial<RelayLivePause>]>([
+    ["ended", { refusal: "stale-binding" }],
+    ["is on another claim", { lineageClaimId: "replaced" }],
+  ])("clears a written Stop whose only pause %s", async (_, change) => {
+    const f = fixture();
+    f.setStop({ copyPath: "notes/plan (unsaved edits).md", copyWritten: true, leftOut: false });
+    await f.settle([{ ...pause, ...change, copy: null }], { listed: false });
+    expect(f.client.ownerYDocStopList).toHaveBeenCalled();
+    expect(f.client.ownerYDocStopClear).toHaveBeenCalledWith(
+      expect.anything(),
+      document,
+      expect.anything(),
+    );
   });
 
   it("clears no Stop while the server still holds its pause", async () => {
