@@ -1,3 +1,4 @@
+import { engineApiMinimum } from "./apiVersion";
 import { notFound, relayError } from "./errors";
 import type { SyncRelayStorage } from "./storage";
 import type { StorageContext } from "./storage/context";
@@ -11,12 +12,17 @@ import { relayLiveNotes } from "./storage/liveDocumentAuthority";
  */
 export type LiveNoteRoute = { route: "live-notes"; workspaceId: string };
 
-export function createLiveNoteRoutes(storage: SyncRelayStorage) {
+export function createLiveNoteRoutes(
+  storage: SyncRelayStorage,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  const engineApiMin = engineApiMinimum(env);
   return (request: Request, route: LiveNoteRoute, ownerUserId: string): Response => {
     if (!storage.workspaceIsOwnedBy(route.workspaceId, ownerUserId)) throw notFound();
     if (request.method !== "GET") throw relayError("method_not_allowed");
     return Response.json(
       {
+        engineApiMin,
         notes: relayLiveNotes(
           storage as StorageContext,
           route.workspaceId,

@@ -47,6 +47,7 @@
     "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./live-note": "./src/liveNote.ts",
+    "./note-format": "./src/noteFormat.ts",
     "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",
     "./relay-values": "./src/relayValues.ts",

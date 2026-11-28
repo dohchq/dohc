@@ -270,6 +270,7 @@ import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspace
 import {
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   protectedCopyOperations,
 } from "./ipc/writeOperations";
 import { createInboxIpcHandlers } from "./ipc/inboxIpc";
@@ -864,6 +865,13 @@ import {
   recordedShareSelector,
 } from "./workspaces/shareViewRecords";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
+import {
+  NOTE_CONVERSION_PAUSED,
+  createNoteConversion,
+  stopsOnceSyncStarts,
+  type NoteConversionRelay,
+} from "./workspaces/noteConversion";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./agents/activeAgentRun";
 import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
@@ -2251,6 +2259,54 @@ async function recordSyncedIfNeeded(workspace: RegistryEntry): Promise<void> {
   if (!existsSync(join(workspace.rootPath, ".dohc", "manifest.json"))) return;
   await recordSynced(workspace.rootPath);
   syncRecorded.add(workspace.workspaceId);
+}
+
+const convertNotesInWorkspace = createNoteConversion();
+
+async function relayForNoteConversion(
+  workspace: RegistryEntry,
+): Promise<NoteConversionRelay | null> {
+  if (!workspace.remote && !workspace.pausedRemote) return null;
+  const syncing = async () => {
+    const current = findWorkspace(workspace.workspaceId);
+    if (!current?.remote) throw new Error(NOTE_CONVERSION_PAUSED);
+    return (await remoteForWorkspace(current)).credentials;
+  };
+  await syncing();
+  return {
+    liveNotes: async () =>
+      relayShareJsonWithCredentials<unknown>(
+        await syncing(),
+        `/sync/${encodeURIComponent(workspace.workspaceId)}/live-notes`,
+      ),
+    drainRecorded: () => activity.drainRecorded(workspace.workspaceId),
+  };
+}
+
+async function convertNotesForOperation(operation: {
+  workspace: PhysicalWorkspace<RegistryEntry>;
+  assertCurrent(): void;
+}): Promise<ConvertNotesResult> {
+  operation.assertCurrent();
+  if (shareViewIsPresent(operation.workspace.shareView))
+    throw new Error("This is a shared view. Only the original workspace converts its notes.");
+  const sessions = desktopEngine.sessions;
+  if (!sessions) throw new Error("Rust engine workspace sessions are unavailable.");
+  const relay = await relayForNoteConversion(operation.workspace);
+  const engineWorkspace = receivedShareEngine.workspaceForRegistered(operation.workspace);
+  return convertNotesInWorkspace(operation.workspace.workspaceId, {
+    relay,
+    assertCurrent: relay
+      ? () => operation.assertCurrent()
+      : stopsOnceSyncStarts(
+          () => operation.assertCurrent(),
+          () => Boolean(findWorkspace(operation.workspace.workspaceId)?.remote),
+        ),
+    convert: (params) =>
+      sessions.run(engineWorkspace, ({ client, workspace }) =>
+        new WorkspaceDaemonRequester(client).request("sync.convertNotes", params, { workspace }),
+      ),
+  });
 }
 
 // Relay-share HTTP: grant-side calls go to the SYNC RELAY (not the
@@ -4196,6 +4252,10 @@ const activity = {
   pushRecorded: (workspaceId: string): Promise<void> =>
     withWorkspaceActivityState(workspaceId, (lease) =>
       workspaceActivity.pushRecorded(lease.state.activity),
+    ),
+  drainRecorded: (workspaceId: string): Promise<void> =>
+    withWorkspaceActivityState(workspaceId, (lease) =>
+      workspaceActivity.drainRecorded(lease.state.activity),
     ),
   syncSnapshot: (workspaceId: string) =>
     withWorkspaceActivityState(workspaceId, (lease) =>
@@ -8434,6 +8494,9 @@ const { startDesktopCliServer } = createDesktopCliServer({
   workspaceMembers,
   memberApps,
   beforeMove: moveAcceptedEdits.beforeMove,
+  noteConversion: {
+    convert: (workspaceId) => withPhysicalWorkspaceOperation(workspaceId, convertNotesForOperation),
+  },
   ownerLiveRecovery: {
     keptEdits: (workspaceId) => desktopEngine.ownerLiveQuarantines(workspaceId),
     pendingShare: (workspaceId) => ownerPendingShare.paths(workspaceId),
@@ -11343,6 +11406,9 @@ function registerIpcHandlers(): void {
   });
   registerOperations(operationBoundary, relayShareOperations, relayShareHandlers);
   registerOperations(operationBoundary, liveNoteOperations, relayShareHandlers);
+  registerOperations(operationBoundary, noteFormatOperations, {
+    convertNotes: (_input, { operation }) => convertNotesForOperation(operation),
+  });
 
   let installedAppCompiler: ReturnType<typeof createInstalledAppCompiler> | undefined;
   const ownerPublicationDependencies = {

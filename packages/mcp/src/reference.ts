@@ -158,6 +158,7 @@ const WEBHOOK_RESULTS: Record<string, CliSocketVerb> = {
   list: "webhookList",
   ...declaredWriteSocketVerbs("webhook"),
 };
+const NOTES_RESULTS: Record<string, CliSocketVerb> = declaredWriteSocketVerbs("notes");
 const SHARE_RESULTS: Record<string, CliSocketVerb> = {
   copy: "shareCopy",
   agents: "shareAgents",
@@ -872,6 +873,7 @@ export const MCP_TOOL_GROUPS: readonly {
       "dohc_list_live_documents",
       "dohc_stop_live_editing",
       "dohc_resume_live_editing",
+      "dohc_convert_notes",
       "dohc_read_held_change",
       "dohc_held_note_change",
       "dohc_save_recovery_copy",
@@ -1074,15 +1076,17 @@ function verbReturns(command: string, name: string): string {
                                 ? SHARE_RESULTS[name]
                                 : command === "webhook"
                                   ? WEBHOOK_RESULTS[name]
-                                  : command === "members"
-                                    ? MEMBERS_RESULTS[name]
-                                    : command === "version"
-                                      ? VERSION_RESULTS[name]
-                                      : command === "account"
-                                        ? ACCOUNT_RESULTS[name]
-                                        : command === "collection"
-                                          ? COLLECTION_RESULTS[name]
-                                          : undefined;
+                                  : command === "notes"
+                                    ? NOTES_RESULTS[name]
+                                    : command === "members"
+                                      ? MEMBERS_RESULTS[name]
+                                      : command === "version"
+                                        ? VERSION_RESULTS[name]
+                                        : command === "account"
+                                          ? ACCOUNT_RESULTS[name]
+                                          : command === "collection"
+                                            ? COLLECTION_RESULTS[name]
+                                            : undefined;
   if (socketVerb !== undefined) {
     if (!Object.hasOwn(cliResultSchemas, socketVerb))
       throw new Error(`dohc ${command} ${name} has no result schema.`);
@@ -1098,6 +1102,7 @@ function verbReturns(command: string, name: string): string {
           "collection",
           "automation",
           "webhook",
+          "notes",
           "sync",
           "account",
         ].includes(command) || branch.properties?.ok?.const !== false,

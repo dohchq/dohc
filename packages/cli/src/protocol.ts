@@ -328,7 +328,7 @@ export function isDeclaredVerb(verb: string): verb is DeclaredVerb {
 const DECLARED_ALTERNATE_INPUTS = { chatLinks: chatLinksGroupInputSchema } as const;
 // Zod reads an input with no fields as Record<string, never>, which would
 // erase the request fields it is joined to.
-type InputFields<Input> = string extends keyof Input ? Record<never, never> : Input;
+export type InputFields<Input> = string extends keyof Input ? Record<never, never> : Input;
 export type DeclaredRequestInput<Verb extends DeclaredVerb> =
   | InputFields<z.output<DeclaredOperationOf<Verb>["input"]>>
   | (Verb extends keyof typeof DECLARED_ALTERNATE_INPUTS
@@ -379,7 +379,7 @@ export function isDeclaredWriteVerb(verb: string): verb is DeclaredWriteVerb {
 // A request that may name its run carries the run's id beside its input.
 const runArgs = { runId: z.string().min(1).optional() };
 type DeclaredWriteArgs<Verb extends DeclaredWriteVerb> = z.output<z.ZodObject<typeof argsBase>> &
-  z.output<DeclaredWriteOf<Verb>["socket"]["input"]> &
+  InputFields<z.output<DeclaredWriteOf<Verb>["socket"]["input"]>> &
   (DeclaredWriteOf<Verb>["socket"]["admission"]["run"] extends "may-name-its-run"
     ? z.output<z.ZodObject<typeof runArgs>>
     : unknown);

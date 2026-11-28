@@ -1005,6 +1005,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -1053,6 +1054,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queueWatchedUpload: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       stop: async () => {},
       snapshot: () => ({
@@ -1297,6 +1299,47 @@ describe("workspaceActivity cloud sync nudge", () => {
     }
   });
 
+  it("refuses to drain what the workspace recorded when no sync engine runs", async () => {
+    const drainRecorded = vi.fn(async () => undefined);
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queueWatchedUpload: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      drainRecorded,
+      catchUp: async () => undefined,
+      snapshot: () => ({
+        syncFailure: null,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        authExpired: false,
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    let signedIn = false;
+    const activity = createWorkspaceActivity(() => {}, {
+      engineFor: () => (signedIn ? engine : null),
+      cloudStateFor: () => ({}),
+    });
+    await activity.open(workspace());
+    await expect(activity.drainRecorded("activity-test")).rejects.toThrow(
+      "dohc could not send changes to your server because sync is not running for this workspace.",
+    );
+    await activity.stopAll();
+
+    signedIn = true;
+    await activity.open(workspace());
+    await expect(activity.drainRecorded("activity-test")).resolves.toBeUndefined();
+    expect(drainRecorded).toHaveBeenCalledOnce();
+    await activity.stopAll();
+  });
+
   it("syncs now only when the pass ends without a failure, whatever the status shows first", async () => {
     let failure: CloudSyncFailure | null = null;
     let passes = 0;
@@ -1309,6 +1352,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         passes += 1;
       },
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: failure,
@@ -1354,6 +1398,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         passes += 1;
       },
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: passes <= busyPasses ? busy : null,
@@ -1408,6 +1453,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -1463,6 +1509,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure,
@@ -1528,6 +1575,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queuePull: () => {},
           retryNow: async () => undefined,
           pushRecorded: async () => undefined,
+          drainRecorded: async () => undefined,
           catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -1603,6 +1651,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -1696,6 +1745,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -1734,6 +1784,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: {
@@ -1776,6 +1827,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure: null,
@@ -1831,6 +1883,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queuePull: () => undefined,
           retryNow: async () => undefined,
           pushRecorded: async () => undefined,
+          drainRecorded: async () => undefined,
           catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -1891,6 +1944,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           queuePull: () => undefined,
           retryNow: async () => undefined,
           pushRecorded: async () => undefined,
+          drainRecorded: async () => undefined,
           catchUp: async () => undefined,
           snapshot: () => ({
             syncFailure: null,
@@ -2058,6 +2112,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         queuePull: () => undefined,
         retryNow: async () => undefined,
         pushRecorded: async () => undefined,
+        drainRecorded: async () => undefined,
         catchUp: async () => undefined,
         snapshot: () => ({
           syncFailure: null,

@@ -412,6 +412,7 @@ interface DesktopCliServerDependencies<State> {
   notices(workspaceId: string): Promise<AgentNotice[]>;
   /** Settings' automation host and incoming webhooks, without a workspace lease (main.ts). */
   agentSetup?: CliServerOptions["agentSetup"];
+  noteConversion?: CliServerOptions["noteConversion"];
   /** Runs a version change after the windows showing the workspace save their open edits (versionRounds.ts). */
   versionRound: ReturnType<typeof createVersionRounds<unknown>>["run"];
   syncSharedChannelsForChatTarget(
@@ -1598,6 +1599,7 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
       openWorkspace: openCliWorkspace,
       notices: dependencies.notices,
       ...(dependencies.agentSetup ? { agentSetup: dependencies.agentSetup } : {}),
+      ...(dependencies.noteConversion ? { noteConversion: dependencies.noteConversion } : {}),
       // Each declared read runs in the workspace the request resolved to.
       reads: mapNamed(
         dependencies.reads,

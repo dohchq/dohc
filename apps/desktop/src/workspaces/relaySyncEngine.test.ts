@@ -1198,6 +1198,128 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  describe("draining what it recorded", () => {
+    const more = {
+      pushed: 500,
+      hasMore: true,
+      originsPushed: [],
+      ownerAdmissionPending: [],
+      sharingDeclined: [],
+    };
+
+    it("drains until a push leaves nothing behind, and refuses once sync stopped", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      pushMock.mockResolvedValueOnce(more);
+      await sync.drainRecorded();
+      expect(pushMock).toHaveBeenCalledTimes(2);
+      await sync.stop();
+      await expect(sync.drainRecorded()).rejects.toThrow(
+        "dohc could not send changes to your server because sync stopped for this workspace.",
+      );
+      expect(pushMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses while a claim stays refused, without pushing", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const message = "Another account already claimed this workspace.";
+      pushMock.mockRejectedValueOnce(new RelayIdentityMissingError());
+      claimMock.mockRejectedValueOnce(new RelayClaimRefusedError(message));
+      const sync = engine({ capture: capture() });
+      await expect(sync.start()).rejects.toThrow(message);
+      pushMock.mockClear();
+      await expect(sync.drainRecorded()).rejects.toThrow(message);
+      expect(pushMock).not.toHaveBeenCalled();
+      errorSpy.mockRestore();
+      await sync.stop();
+    });
+
+    it("refuses when sync stops while the outbox still holds changes", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      pushMock.mockImplementationOnce(async () => {
+        void sync.stop();
+        return more;
+      });
+      await expect(sync.drainRecorded()).rejects.toThrow("sync stopped for this workspace");
+      expect(pushMock).toHaveBeenCalledOnce();
+    });
+
+    it("refuses when the last push leaves changes waiting for the owner to admit them", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      pushMock.mockResolvedValueOnce({
+        ...more,
+        pushed: 1,
+        hasMore: false,
+        ownerAdmissionPending: [
+          {
+            workspaceId: "workspace",
+            originId: "origin",
+            originSeq: 4,
+            versionId: "main",
+            objectId: "object",
+            path: "notes.md",
+          },
+        ],
+      });
+      await expect(sync.drainRecorded()).rejects.toThrow(
+        "dohc could not send every change to your server yet. 1 change is waiting for the owner to admit it.",
+      );
+      expect(pushMock).toHaveBeenCalledOnce();
+      await sync.stop();
+    });
+
+    it("keeps draining through seven pushes in a row that send nothing, once one sends", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      for (let pass = 0; pass < 7; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      pushMock.mockResolvedValueOnce(more);
+      for (let pass = 0; pass < 7; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      await sync.drainRecorded();
+      expect(pushMock).toHaveBeenCalledTimes(16);
+      await sync.stop();
+    });
+
+    it("refuses instead of looping after eight pushes in a row that send nothing and report more", async () => {
+      const sync = engine({ capture: capture() });
+      await sync.start();
+      pushMock.mockClear();
+      for (let pass = 0; pass < 9; pass += 1)
+        pushMock.mockResolvedValueOnce({ ...more, pushed: 0 });
+      await expect(sync.drainRecorded()).rejects.toThrow(
+        "dohc could not send changes to your server. It took none of them 8 times in a row and said more were waiting.",
+      );
+      expect(pushMock).toHaveBeenCalledTimes(8);
+      await sync.stop();
+    });
+
+    it("counts only a pass that pushed, so a pull-only bootstrap pass does not end it", async () => {
+      const sync = createRelaySyncEngine({
+        rootDir: "/tmp/workspace",
+        relay: { baseUrl: "http://relay.test", token: "token" },
+        operations: mockOperations(),
+        capture: capture(),
+        onChange: vi.fn(),
+        joinBootstrap: true,
+        debounceMs: 100,
+        nowMs: () => 12345,
+      });
+      await sync.drainRecorded();
+      expect(pushMock).toHaveBeenCalledOnce();
+      expect(pushMock.mock.invocationCallOrder[0]!).toBeGreaterThan(
+        pullMock.mock.invocationCallOrder[0]!,
+      );
+      await sync.stop();
+    });
+  });
+
   it("starts a new failure after every success, however often they alternate", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     let pass = 0;

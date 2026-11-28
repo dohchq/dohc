@@ -1,4 +1,5 @@
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
+import { NOTE_CONVERSION_DEADLINE_MS } from "@dohc/workspace-contracts/note-format";
 import {
   WorkspaceSyncPause,
   workspaceSyncPauseStatus,
@@ -2183,6 +2184,7 @@ async function requestCli<Verb extends CliVerb>(
       ...(signal ? { signal } : {}),
       ...(verb === "watch" ? { timeoutMs: 30_000 } : {}),
       ...(verb === "dataset" || verb === "appPublication" ? { timeoutMs: 90_000 } : {}),
+      ...(verb === "notesConvert" ? { timeoutMs: NOTE_CONVERSION_DEADLINE_MS } : {}),
     });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };

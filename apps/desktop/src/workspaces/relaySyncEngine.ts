@@ -142,12 +142,17 @@ export interface CloudSyncEngine {
   // Runs passes until a push leaves nothing behind, so what the workspace
   // recorded before the call is on the relay. Rejects when a pass fails.
   pushRecorded(): Promise<void>;
+  drainRecorded(): Promise<void>;
   // One pass for a waiting move. It leaves every ordinary timer alone, and
   // once `signal` aborts it skips its pull. It never rejects.
   catchUp(options: { signal: AbortSignal }): Promise<void>;
   snapshot(): CloudSyncSnapshot;
   stop(): Promise<void>;
 }
+
+const DRAIN_EMPTY_PASS_LIMIT = 8;
+
+type PushOutcome = { ran?: boolean; hasMore: boolean; sent?: number; held?: number };
 
 export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyncEngine {
   const operations = options.operations;
@@ -543,7 +548,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // renderer then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(
     retryClaim: boolean,
-    pushed?: { hasMore: boolean },
+    pushed?: PushOutcome,
     guard?: { signal: AbortSignal },
   ): Promise<boolean> {
     const beforePending = pendingChangeCount;
@@ -563,7 +568,12 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
       pushHasMore = result.hasMore;
-      if (pushed) pushed.hasMore = result.hasMore;
+      if (pushed) {
+        pushed.ran = true;
+        pushed.hasMore = result.hasMore;
+        pushed.sent = result.pushed;
+        pushed.held = result.ownerAdmissionPending.length;
+      }
       if (watched) watchedDirty ||= result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
@@ -714,7 +724,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     rethrow: boolean,
     quiet = false,
     retry?: { countsAsAttempt: boolean },
-    pushed?: { hasMore: boolean },
+    pushed?: PushOutcome,
     // A guard pass never cancels, moves or re-arms ordinary work.
     guard?: { signal: AbortSignal },
   ): Promise<void> {
@@ -829,6 +839,35 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         const pushed = { hasMore: false };
         await runPass(true, false, undefined, pushed);
         if (!pushed.hasMore) return;
+      }
+    },
+
+    async drainRecorded() {
+      let emptyPasses = 0;
+      for (;;) {
+        if (claimRefusal) throw claimRefusal;
+        if (authExpired || stopped)
+          throw new Error(
+            "dohc could not send changes to your server because sync stopped for this workspace.",
+          );
+        const pushed = { ran: false, hasMore: true, sent: 0, held: 0 };
+        await runPass(true, false, undefined, pushed);
+        if (!pushed.ran) continue;
+        emptyPasses = pushed.hasMore && pushed.sent === 0 ? emptyPasses + 1 : 0;
+        if (emptyPasses === DRAIN_EMPTY_PASS_LIMIT)
+          throw new Error(
+            `dohc could not send changes to your server. It took none of them ${DRAIN_EMPTY_PASS_LIMIT} times in a row and said more were waiting.`,
+          );
+        if (pushed.hasMore) continue;
+        if (pushed.held === 1)
+          throw new Error(
+            "dohc could not send every change to your server yet. 1 change is waiting for the owner to admit it.",
+          );
+        if (pushed.held > 1)
+          throw new Error(
+            `dohc could not send every change to your server yet. ${pushed.held} changes are waiting for the owner to admit them.`,
+          );
+        return;
       }
     },
 

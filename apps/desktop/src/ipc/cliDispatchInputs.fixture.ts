@@ -212,6 +212,7 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "drawing edit": ["plan.excalidraw", '{"update":[{"id":"a","expectedVersion":1,"x":10}]}'],
   "automation use-server": ["--generation", "3"],
   "webhook create": ["Waitlist", "--collection", "waitlist"],
+  "notes convert": [],
   // JSON verb parsers declare their socket dispatch after validating these request fields.
   ...Object.fromEntries(
     Object.entries(CLI_COMMANDS).flatMap(([group, command]) =>

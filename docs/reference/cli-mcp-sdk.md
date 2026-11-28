@@ -40,7 +40,7 @@ When an agent connects, the server sends short instructions and serves the skill
 | **Automations and Buttons** | [`dohc_list_automations`](#dohc_list_automations), [`dohc_switch_automation`](#dohc_switch_automation), [`dohc_inspect_buttons`](#dohc_inspect_buttons), [`dohc_press_button`](#dohc_press_button), [`dohc_list_automation_runs`](#dohc_list_automation_runs), [`dohc_read_automation_run`](#dohc_read_automation_run), [`dohc_retry_automation_run`](#dohc_retry_automation_run), [`dohc_read_automation_host`](#dohc_read_automation_host), [`dohc_use_server_for_automations`](#dohc_use_server_for_automations), [`dohc_list_incoming_webhooks`](#dohc_list_incoming_webhooks), [`dohc_create_incoming_webhook`](#dohc_create_incoming_webhook) |
 | **Versions and History** | [`dohc_list_versions`](#dohc_list_versions), [`dohc_create_version`](#dohc_create_version), [`dohc_switch_version`](#dohc_switch_version), [`dohc_compare_version`](#dohc_compare_version), [`dohc_merge_version`](#dohc_merge_version), [`dohc_update_version`](#dohc_update_version), [`dohc_archive_version`](#dohc_archive_version), [`dohc_list_version_conflicts`](#dohc_list_version_conflicts), [`dohc_resolve_version_conflict`](#dohc_resolve_version_conflict), [`dohc_list_changes`](#dohc_list_changes), [`dohc_read_change`](#dohc_read_change), [`dohc_read_operation`](#dohc_read_operation), [`dohc_undo_operation`](#dohc_undo_operation), [`dohc_plan_agent_run_undo`](#dohc_plan_agent_run_undo) |
 | **Sharing and connected agents** | [`dohc_read_share_copy`](#dohc_read_share_copy), [`dohc_list_link_agents`](#dohc_list_link_agents), [`dohc_disconnect_link_agent`](#dohc_disconnect_link_agent), [`dohc_members`](#dohc_members), [`dohc_collection_access`](#dohc_collection_access), [`dohc_list_member_apps`](#dohc_list_member_apps), [`dohc_inspect_member_app`](#dohc_inspect_member_app), [`dohc_read_member_app_source`](#dohc_read_member_app_source), [`dohc_share_member_app`](#dohc_share_member_app), [`dohc_fork_member_app`](#dohc_fork_member_app), [`dohc_promote_member_app`](#dohc_promote_member_app), [`dohc_withdraw_member_app`](#dohc_withdraw_member_app), [`dohc_set_member_app_sharing`](#dohc_set_member_app_sharing) |
-| **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
+| **Internal sync, live-document, and recovery** | [`dohc_stop_workspace_sync`](#dohc_stop_workspace_sync), [`dohc_list_live_documents`](#dohc_list_live_documents), [`dohc_stop_live_editing`](#dohc_stop_live_editing), [`dohc_resume_live_editing`](#dohc_resume_live_editing), [`dohc_convert_notes`](#dohc_convert_notes), [`dohc_read_held_change`](#dohc_read_held_change), [`dohc_held_note_change`](#dohc_held_note_change), [`dohc_save_recovery_copy`](#dohc_save_recovery_copy), [`dohc_retry_kept_edits`](#dohc_retry_kept_edits), [`dohc_stop_again`](#dohc_stop_again), [`dohc_list_outside_changes`](#dohc_list_outside_changes), [`dohc_keep_outside_change`](#dohc_keep_outside_change), [`dohc_list_kept_copies`](#dohc_list_kept_copies), [`dohc_save_kept_copy`](#dohc_save_kept_copy), [`dohc_restore_protected_copy`](#dohc_restore_protected_copy), [`dohc_discard_protected_copy`](#dohc_discard_protected_copy), [`dohc_list_retained_copies`](#dohc_list_retained_copies), [`dohc_delete_retained_copies`](#dohc_delete_retained_copies) |
 
 ---
 
@@ -1049,6 +1049,16 @@ Changes the workspace, so a shared view does not offer it.
 
 Returns `{ ok: true, path, already?: true, ended?: true } | { ok: false, reason }`.
 
+### `dohc_convert_notes`
+
+Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.
+
+Changes the workspace, so a shared view does not offer it.
+
+No arguments.
+
+Returns `{ ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent } | { ok: false, reason }`.
+
 ### `dohc_read_held_change`
 
 Read a change dohc held for a Markdown file because saving it would rewrite parts dohc can't show. `file` is the file's text on disk, or null; `held` is what saving the change would write. `change` is null when nothing is held. A change too large to return reports `tooLarge`. When dohc can't preview the change exactly, such as while edits wait to sync, it reports `unavailable` instead.
@@ -1299,6 +1309,22 @@ Read a drawing's elements, as an open canvas holds them.
 - `--points`: Include line, arrow, and freehand points.
 
 With `--json`, prints `{ schemaVersion, path, live, elements: { id, type, version, x, y, width, height, angle?, text?, strokeColor?, backgroundColor?, link?, groupIds?, frameId?, containerId?, startBinding?, endBinding?, boundElements?, points?, pointCount? }[], appState }`.
+
+### `dohc notes`
+
+Convert this workspace's notes to the new format.
+
+#### `dohc notes convert`
+
+```sh
+dohc notes convert [options]
+```
+
+Convert this workspace's notes to the new format, as Convert notes does in Settings.
+
+Prints how many notes it converted, then the paths it left as they were and why. Run it again to convert notes that were open or busy. Every computer and phone must run a dohc that reads the new format first. It cannot be undone.
+
+With `--json`, prints `{ schemaVersion, ok: true, converted, unchanged, skipped: { path, reason }[], doesNotFit: { path }[], failed: { path, reason }[], sent }`.
 
 ### `dohc notices`
 

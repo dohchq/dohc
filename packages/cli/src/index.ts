@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NOTE_CONVERSION_DEADLINE_MS } from "@dohc/workspace-contracts/note-format";
 import { parseCliArguments, type ParsedCliCommand } from "./args";
 import { sendCliRequest, VERSION_CHANGE_VERBS, type CliClientOptions } from "./client";
 import { cliErrorLine, DohcCliError } from "./errors";
@@ -885,23 +886,25 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
             options.client?.timeoutMs ??
             (command.verb === "accountDelete"
               ? 120_000
-              : // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
-                command.verb === "saveRecoveryCopy"
-                ? 420_000
-                : // A paced Access refresh waits up to a minute for the next roster check.
-                  command.verb === "historyUndo" ||
-                    command.verb === "accessRefresh" ||
-                    command.verb === "undoAgentRun" ||
-                    command.verb === "automationUseServer" ||
-                    command.verb === "dataset" ||
-                    command.verb === "appPublication" ||
-                    command.verb === "ownerAppResponses" ||
-                    command.verb === "memberAppShare" ||
-                    command.verb === "memberAppFork" ||
-                    command.verb === "memberAppPromote" ||
-                    VERSION_CHANGE_VERBS.has(command.verb)
-                  ? 90_000
-                  : DEFAULT_RESPONSE_TIMEOUT_MS),
+              : command.verb === "notesConvert"
+                ? NOTE_CONVERSION_DEADLINE_MS
+                : // The server may take 5 minutes to prepare an earlier store, and dohc waits up to 6.
+                  command.verb === "saveRecoveryCopy"
+                  ? 420_000
+                  : // A paced Access refresh waits up to a minute for the next roster check.
+                    command.verb === "historyUndo" ||
+                      command.verb === "accessRefresh" ||
+                      command.verb === "undoAgentRun" ||
+                      command.verb === "automationUseServer" ||
+                      command.verb === "dataset" ||
+                      command.verb === "appPublication" ||
+                      command.verb === "ownerAppResponses" ||
+                      command.verb === "memberAppShare" ||
+                      command.verb === "memberAppFork" ||
+                      command.verb === "memberAppPromote" ||
+                      VERSION_CHANGE_VERBS.has(command.verb)
+                    ? 90_000
+                    : DEFAULT_RESPONSE_TIMEOUT_MS),
           env,
         });
       }

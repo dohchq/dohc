@@ -134,6 +134,11 @@ export function createInMemoryWorkspaceActivity(
       if (!authority) throw new Error("This workspace is not open.");
       await service.syncNow(authority.state);
     },
+    drainRecorded: async (workspaceId: string): Promise<void> => {
+      const authority = authorities.get(workspaceId);
+      if (!authority) throw new Error("This workspace is not open.");
+      await service.drainRecorded(authority.state);
+    },
     setAgentRun: (workspaceId: string, run: ActiveAgentRun | null): Promise<void> => {
       const authority = requireAuthority(workspaceId);
       return service.setAgentRun(authority.workspace, authority.state, run);

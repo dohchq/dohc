@@ -16,6 +16,10 @@ export const agentRunUndoOperations = declaredWriteRows(
   "agentRunUndo",
   WORKSPACE_ID,
 ) satisfies OperationTable;
+export const noteFormatOperations = declaredWriteRows(
+  "noteFormat",
+  WORKSPACE_ID,
+) satisfies OperationTable;
 export const liveNoteOperations = declaredWriteRows(
   "liveNote",
   WORKSPACE_ID,

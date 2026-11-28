@@ -863,6 +863,58 @@ describe("executeCli", () => {
     }
   });
 
+  it("waits for a note conversion that runs longer than 30 seconds", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const stateDir = await tempStateDir();
+      const transport = vi.fn(
+        (_path: string, _body: string, timeoutMs: number | undefined) =>
+          new Promise<unknown>((resolve, reject) => {
+            if (timeoutMs !== undefined && timeoutMs < 40_000)
+              setTimeout(() => reject(new Error("desktop app did not respond")), timeoutMs);
+            setTimeout(
+              () =>
+                resolve({
+                  protocolVersion: CLI_PROTOCOL_VERSION,
+                  ok: true,
+                  result: {
+                    ok: true,
+                    converted: 1980,
+                    unchanged: 6,
+                    skipped: [{ path: "plan.md", reason: "open-here" }],
+                    doesNotFit: [],
+                    failed: [],
+                    sent: true,
+                  },
+                }),
+              40_000,
+            );
+          }),
+      );
+      const pending = executeCli({
+        argv: ["notes", "convert"],
+        cwd: "/workspace",
+        env: {},
+        client: { stateDir, transport, platform: "linux" },
+      });
+      await vi.waitFor(() => expect(transport).toHaveBeenCalled());
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(await pending).toEqual({
+        exitCode: 0,
+        stdout:
+          "Converted 1980 notes. 6 were already converted.\n\nOpen on this computer (1):\n  plan.md\n",
+        stderr: "",
+      });
+      expect(transport).toHaveBeenCalledWith(
+        join(stateDir, "dohc-cli.sock"),
+        expect.any(String),
+        600_000,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("passes the ambient run id through every chat write request only", async () => {
     const requests: CliRequestWithoutToken[] = [];
     const request = async (value: CliRequestWithoutToken): Promise<unknown> => {

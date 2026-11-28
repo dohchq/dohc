@@ -61,6 +61,7 @@ import {
   type DeclaredWrite,
   type DeclaredWriteOf,
   type DeclaredWriteVerb,
+  type InputFields,
   cliRequestSchema,
 } from "./protocol";
 import { CHAT_WORK_STATUSES, isChatWorkStatus } from "@dohc/workspace-contracts/chat-work";
@@ -288,8 +289,8 @@ export interface CliFlag {
 // A declared write's command. Its words and capability come from the
 // declaration. Its parser is written in the command's table, where its place
 // sets its place in help.
-type DeclaredWriteInput<Verb extends DeclaredWriteVerb> = z.output<
-  DeclaredWriteOf<Verb>["socket"]["input"]
+type DeclaredWriteInput<Verb extends DeclaredWriteVerb> = InputFields<
+  z.output<DeclaredWriteOf<Verb>["socket"]["input"]>
 >;
 type DeclaredWriteCommand = {
   [Verb in DeclaredWriteVerb]: { verb: Verb } & DeclaredWriteInput<Verb>;
@@ -2598,6 +2599,16 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
           path,
           requestId: lastValue(input, "--request-id"),
         });
+      }),
+    },
+  },
+  notes: {
+    summary: "Convert this workspace's notes to the new format.",
+    notes: [],
+    verbs: {
+      convert: declaredWrite("notesConvert", ({ operands }) => {
+        noExtraArgs(operands, "notes convert");
+        return {};
       }),
     },
   },

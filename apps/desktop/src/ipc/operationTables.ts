@@ -57,6 +57,7 @@ import { settingsOperations } from "./settingsOperations";
 import {
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./writeOperations";
@@ -135,6 +136,7 @@ export const OPERATION_TABLES = [
   protectedCopyOperations,
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
   agentsListeningOperations,

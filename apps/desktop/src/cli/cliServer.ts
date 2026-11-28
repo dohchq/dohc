@@ -1,3 +1,4 @@
+import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import {
   MESSAGE_DELETE_FAILED,
   type GroupRuleLevel,
@@ -743,6 +744,7 @@ export interface CliServerOptions {
       input: { name: string; collectionPath: string },
     ): Promise<IncomingWebhookCreatedResult>;
   };
+  noteConversion?: { convert(workspaceId: string): Promise<ConvertNotesResult> };
   // The app's reader for each declared verb. A verb without one is unavailable.
   reads?: Partial<DeclaredReaders<CliRegistryWorkspace>>;
   // Messages, reactions, and decisions go through the same module renderer
@@ -3436,6 +3438,15 @@ const DECLARED_WRITERS: {
       return { ok: true as const, ...result };
     } catch (error) {
       return pathFreeFailure(error, "dohc could not move this Inbox item.");
+    }
+  },
+  notesConvert: async (_request, context, options) => {
+    if (!options.noteConversion)
+      return { ok: false as const, reason: "Converting notes is unavailable here." };
+    try {
+      return { ok: true as const, ...(await options.noteConversion.convert(context.workspaceId)) };
+    } catch (error) {
+      return mcpFailure(error, "dohc could not convert notes.");
     }
   },
   automationUseServer: async (request, context, options) => {

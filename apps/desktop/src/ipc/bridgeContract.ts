@@ -186,6 +186,7 @@ import type { OperationBridge, OperationTable } from "./operationTable";
 import type {
   agentRunUndoOperations,
   liveNoteOperations,
+  noteFormatOperations,
   protectedCopyOperations,
   stoppedRunOperations,
 } from "./writeOperations";
@@ -9552,6 +9553,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
     OperationBridge<typeof protectedCopyOperations>,
+    OperationBridge<typeof noteFormatOperations>,
     OperationBridge<typeof agentRunUndoOperations>,
     OperationBridge<typeof liveNoteOperations>,
     OperationBridge<typeof memberAppsReadOperations>,
