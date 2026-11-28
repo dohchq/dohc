@@ -168,3 +168,17 @@ it("never lists another workspace's live notes", async () => {
   expect(await list()).toEqual([]);
   expect(await list("elsewhere")).toEqual([{ objectId: document.objectId, kinds: ["enrolment"] }]);
 });
+
+it("names the relay's engine floor beside its live notes, so a client behind any proxy reads it", async () => {
+  const { f } = quietNote();
+  const floor = async (env: Record<string, string>) =>
+    (
+      (await createLiveNoteRoutes(f.storage, env)(
+        new Request("https://relay.invalid/"),
+        { route: "live-notes", workspaceId: "workspace" },
+        "owner",
+      ).json()) as { engineApiMin: unknown }
+    ).engineApiMin;
+  expect(await floor({ DOHC_RELAY_ENGINE_API_MIN: "2" })).toBe(2);
+  expect(await floor({})).toBe(1);
+});
