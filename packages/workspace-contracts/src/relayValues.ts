@@ -42,7 +42,7 @@ export function relayUrlsMatch(left: string, right: string): boolean {
 // sends this one without that promise. The relay can require version 2 on the
 // engine's routes with DOHC_RELAY_ENGINE_API_MIN.
 export const RELAY_API_VERSION_HEADER = "x-dohc-api-version";
-export const RELAY_API_VERSION = 1;
+export const RELAY_API_VERSION = 2;
 
 // Share-web and the relay have independent wire contracts. Never stamp the
 // relay version onto share-web requests, even when both counters are equal.

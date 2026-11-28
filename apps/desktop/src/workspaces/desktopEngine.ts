@@ -1,4 +1,5 @@
 import { installedReaderConfig } from "./installedReaderConfig";
+import { engineNoteBodySequence } from "./noteConversion";
 import { catchUpFromJournal, OwnerJournalPending, type OwnerJournalRead } from "./ownerJournal";
 import {
   reconcileOwnerLiveStops,
@@ -1895,6 +1896,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       let publications = 0;
       rustEngineDaemon = createRustEngineDaemon({
         readerConfig: installedReaderConfig(dependencies.resourcesBasePath()),
+        noteBodySequence: engineNoteBodySequence(process.env),
         ...(ingress ? { privateOwnerHost: ingress } : {}),
         startupSmoke: startupSmoke.promise,
         // On Linux, Ctrl+C or a stop sent to dohc's process group reaches dohc

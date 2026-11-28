@@ -26,6 +26,7 @@ const SKIPPED_NOTE_GROUPS: Readonly<Record<string, string>> = {
   "open-conflict": "Waiting on a review",
   "unsent-edit": "Unsent edits",
   "ydoc-unsettled": "Not saved to disk yet",
+  "local-new-notes-format-one": "Converts in a later update, in workspaces that don't sync",
   "ydoc-lineage-unclaimed": HISTORY_INCOMPLETE,
   "ydoc-incomplete-lineage": HISTORY_INCOMPLETE,
   "ydoc-deferred-updates-pending": HISTORY_INCOMPLETE,

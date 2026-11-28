@@ -53,7 +53,7 @@ pub fn convert_note_to_format_two_in_tx(
     now_ms: i64,
 ) -> Result<FormatTwoConversion, SyncError> {
     use FormatTwoConversion::{Converted, DoesNotFit, NotNow};
-    if dohc_engine_collab::new_note_schema_version(ContentKind::Richdoc) != 2 {
+    if !dohc_engine_collab::ydoc::reads_body_sequence() {
         return Ok(NotNow("note-format-two-off"));
     }
     let Ready {
@@ -407,7 +407,7 @@ pub fn convert_notes_to_format_two(
 ) -> Result<FormatTwoPass, SyncError> {
     use FormatTwoConversion::{Converted, DoesNotFit, NotNow, NothingToConvert};
     let mut pass = FormatTwoPass::default();
-    if dohc_engine_collab::new_note_schema_version(ContentKind::Richdoc) != 2 {
+    if !dohc_engine_collab::ydoc::reads_body_sequence() {
         pass.off = true;
         return Ok(pass);
     }
@@ -573,6 +573,9 @@ fn drop_local_format_one(
         successor_in_format_two(key, "", "", "", &ready.text, &ready.text_sha256)
     {
         return Ok(DoesNotFit(overweight));
+    }
+    if dohc_engine_collab::new_note_schema_version(ContentKind::Richdoc) != 2 {
+        return Ok(NotNow("local-new-notes-format-one"));
     }
     let Some(projection) = settled_source(&ready.doc, &ready.text) else {
         return Ok(NotNow("ydoc-unsettled"));

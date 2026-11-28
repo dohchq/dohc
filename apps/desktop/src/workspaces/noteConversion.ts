@@ -22,19 +22,23 @@ export const NOTE_CONVERSION_SIGNED_OUT =
   "dohc could not convert notes. Sign in to the account that synced this workspace, then try again.";
 export const NOTE_CONVERSION_SHARED_VIEW =
   "This is a shared view. Only the original workspace converts its notes.";
+const NOTE_CONVERSION_SYNCED_BEFORE =
+  "dohc could not convert notes because this folder synced before. Turn sync back on in Settings, then try again.";
 
 type ConvertingWorkspace = Pick<RegistryEntry, "remote" | "pausedRemote" | "shareView">;
 
+type Env = Readonly<Record<string, string | undefined>>;
+
+export function engineNoteBodySequence(env: Env): string {
+  return env.DOHC_ENGINE_NOTE_BODY_SEQUENCE ?? "1";
+}
+
 export function noteConversionOffered(
-  env: Readonly<Record<string, string | undefined>>,
+  env: Env,
   workspace: ConvertingWorkspace,
   credentials: CloudCredentials | null,
 ): boolean {
-  return (
-    env.DOHC_ENGINE_NOTE_BODY_SEQUENCE === "1" &&
-    env.DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE === "1" &&
-    localPersonOwnsWorkspace(workspace, credentials)
-  );
+  return engineNoteBodySequence(env) === "1" && localPersonOwnsWorkspace(workspace, credentials);
 }
 
 export function noteConversionReach(
@@ -73,7 +77,7 @@ export interface NoteConversionRelay {
 
 export interface NoteConversionRun {
   relay: NoteConversionRelay | null;
-  convert(params: { after?: string; budget: number; relayLive: string[] }): Promise<unknown>;
+  convert(params: { after?: string; budget: number; relayLive?: string[] }): Promise<unknown>;
   assertCurrent(): void;
   progress?(done: number, total: number): void;
 }
@@ -143,7 +147,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
         let more = true;
         while (more) {
           run.assertCurrent();
-          const relayLive = relay ? await liveAboveFloor(relay) : [];
+          const relayLive = relay ? { relayLive: await liveAboveFloor(relay) } : {};
           const before = result.converted;
           for (let note = 0; note < batch && more; note += 1) {
             run.assertCurrent();
@@ -151,7 +155,7 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
               await run.convert({
                 ...(after === undefined ? {} : { after }),
                 budget: 1,
-                relayLive,
+                ...relayLive,
               }),
             );
             if (pass.off) throw new Error(NOTE_CONVERSION_OFF);
@@ -174,6 +178,8 @@ export function createNoteConversion(batch = NOTE_CONVERSION_BATCH) {
           if (more && relay && result.converted > before) await relay.drainRecorded();
         }
       } catch (error) {
+        if (error instanceof Error && error.message === "note-format-two-relay-unchecked")
+          throw new Error(NOTE_CONVERSION_SYNCED_BEFORE, { cause: error });
         if (result.converted === 0) throw error;
         return {
           ...result,

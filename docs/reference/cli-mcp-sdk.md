@@ -1051,7 +1051,7 @@ Returns `{ ok: true, path, already?: true, ended?: true } | { ok: false, reason 
 
 ### `dohc_convert_notes`
 
-Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. `stopped` says why a run stopped partway; the counts say what it did first, and running it again finishes. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.
+Convert the owner's notes in this workspace to the new format, as Convert notes does in Settings › Advanced. Notes open on this computer or elsewhere, held, waiting on a review, or not yet saved stay as they were and are listed in `skipped` with a reason; run it again later to convert them. In a workspace that doesn't sync, notes only this computer has stay as they were until a later update, and are listed in `skipped` with the reason `local-new-notes-format-one`. `doesNotFit` lists notes the new format cannot hold. `sent` is false when dohc converted notes but could not send them to the server yet. `stopped` says why a run stopped partway; the counts say what it did first, and running it again finishes. Every computer and phone must run a dohc that reads the new format first. It cannot be undone. Owner workspace only.
 
 Changes the workspace, so a shared view does not offer it.
 
