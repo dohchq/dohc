@@ -1515,6 +1515,47 @@ fn pending_local_recoveries(
     })
 }
 
+pub(crate) fn pending_inactive_recoveries(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT moment.version_id, moment.path
+                   FROM materialization_jobs AS job
+                   JOIN moments AS moment
+                     ON moment.workspace_id=?1
+                    AND moment.moment_id=substr(job.job_id, length('sync-mat_')+1)
+                   JOIN snapshots AS snapshot
+                     ON snapshot.workspace_id=moment.workspace_id
+                    AND snapshot.version_id=moment.version_id
+                    AND snapshot.object_id=moment.object_id
+                    AND snapshot.path=moment.path
+                    AND snapshot.latest_moment_id=moment.moment_id
+                  WHERE job.status='pending'
+                    AND job.workspace_id=?1
+                    AND job.operation='write'
+                    AND job.job_id GLOB 'sync-mat_*'
+                    AND moment.metadata_correlation_id GLOB 'ydoc-inactive-recovery:*'
+                  ORDER BY job.target_generation",
+            )
+            .map_err(SyncError::corrupt)?;
+        let rows = statement
+            .query_map([workspace_id], |row| {
+                Ok(MomentMaterializationChange {
+                    version_id: row.get(0)?,
+                    path: row.get(1)?,
+                    operation: "write",
+                    content_kind: "text",
+                })
+            })
+            .map_err(SyncError::corrupt)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)
+    })
+}
+
 fn relocate_conflicted_recovery_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
