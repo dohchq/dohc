@@ -125,9 +125,7 @@ function releasedCopyCreation(
   };
 }
 
-function ydocRecovery(
-  payloadJson: string,
-): { objectId: string; momentId: string; key: string } | null {
+function ydocRecovery(payloadJson: string) {
   let payload: Record<string, unknown> | null;
   try {
     payload = asRecord(JSON.parse(payloadJson));
@@ -156,6 +154,8 @@ function ydocRecovery(
   return {
     objectId: payload.objectId,
     momentId: payload.momentId,
+    versionId: String(payload.versionId),
+    path: String(payload.payloadAfterPath),
     key: stableJsonStringify([
       payload.versionId,
       payload.objectId,
@@ -267,16 +267,34 @@ export function appendLogBatchInTransaction(
        AND l.op_kind = 'moment.append' AND l.relay_admission IS NULL
      ORDER BY m.relay_seq LIMIT 1`,
   );
-  const classify = (op: SyncRelayLogInput) => {
+  const placedOrChangedStmt = storage.db.prepare(
+    `SELECT 1 WHERE EXISTS (SELECT 1 FROM sync_relay_current_files
+         WHERE workspace_id = ? AND version_id = ? AND path = ? AND state_relay_seq = ?)
+       OR EXISTS (SELECT 1 FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq > ?)`,
+  );
+  const classifyRecovery = (op: SyncRelayLogInput) => {
     if (op.opKind !== "moment.append") return;
     const recovery = ydocRecovery(op.payloadJson);
-    if (recovery) {
-      const first = firstCreationStmt.get(input.workspaceId, recovery.objectId, recovery.momentId);
-      if (first && ydocRecovery(String(first.payload_json))?.key === recovery.key)
-        duplicateRecoveries.add(op.originSeq);
-      return;
-    }
-    if (!input.classifyRedundantRecoveries) return;
+    if (!recovery) return;
+    const found = firstCreationStmt.get(input.workspaceId, recovery.objectId, recovery.momentId);
+    const first = found && ydocRecovery(String(found.payload_json));
+    if (!first || first.key !== recovery.key) return;
+    const firstSeq = Number(found.relay_seq);
+    if (
+      placedOrChangedStmt.get(
+        input.workspaceId,
+        first.versionId,
+        first.path,
+        firstSeq,
+        input.workspaceId,
+        recovery.objectId,
+        firstSeq,
+      )
+    )
+      duplicateRecoveries.add(op.originSeq);
+  };
+  const classify = (op: SyncRelayLogInput) => {
+    if (!input.classifyRedundantRecoveries || op.opKind !== "moment.append") return;
     const creation = releasedCopyCreation(op.payloadJson);
     if (!creation) return;
     const first = firstCreationStmt.get(input.workspaceId, creation.objectId, creation.momentId);
@@ -345,6 +363,7 @@ export function appendLogBatchInTransaction(
     }
     currentMax = op.originSeq;
     classify(op);
+    classifyRecovery(op);
     newOps.push(op);
     addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
     if (op.admittedAuthorSnapshot !== undefined) {
