@@ -15,7 +15,14 @@ import { hashRelayExchangeKey, verifyRelayExchangeKey } from "./linkSecurity";
 import type { LiveTicketScope } from "./liveBrowserContext";
 import { binding, scope } from "./liveTickets.test-helper";
 import { personalRouteFixture } from "./personalLiveDocumentRoutes.test-helper";
-import { createPhonePages, PHONE_OWNER_DOCUMENTS_PER_ACCOUNT } from "./phonePages";
+import { parseAccessRule } from "@dohc/security-contract/access-rules";
+import {
+  createPhoneMemberLiveSessions,
+  createPhonePages,
+  PHONE_OWNER_DOCUMENTS_PER_ACCOUNT,
+} from "./phonePages";
+import { pauseLiveRoom } from "./storage/liveRoomPauses";
+import { WORKSPACE_SHARE_SELECTOR_JSON } from "./storage/workspaceMembers";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
 import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeletion";
@@ -470,4 +477,343 @@ it("refuses a format-2 page while the relay's switch is off, for the phone and t
   expect(await f.open(binding.currentPath)).toEqual(refused("note-format-off"));
   expect(await f.browserOpen(binding.currentPath)).toEqual(refused("note-format-off"));
   expect(f.mint).not.toHaveBeenCalled();
+});
+
+async function joinedPhone() {
+  const f = await personalRouteFixture(
+    (close) => {
+      cleanup.push(close);
+    },
+    { live: false },
+  );
+  let now = Date.now();
+  const stored = new Map<string, StoredAccountSession>([
+    ["phone-owner", { userId: "owner-1", expiresAtMs: now + 50_000, clientKind: "phone" }],
+    ["phone-m1", { userId: "member-1", expiresAtMs: now + 50, clientKind: "phone" }],
+    ["phone-m2", { userId: "member-1", expiresAtMs: now + 50_000, clientKind: "phone" }],
+  ]);
+  const sessions = {
+    read: vi.fn(
+      async (ids: readonly string[]) =>
+        new Map(
+          ids.flatMap((id): Array<[string, StoredAccountSession]> => {
+            const session = stored.get(id);
+            return session ? [[id, session]] : [];
+          }),
+        ),
+    ),
+  };
+  const ownerMint = vi.fn(async () => ({ token: "owner-ticket", expiresAtMs: now + 30_000 }));
+  const memberMint = vi.fn(async () => ({ token: "member-ticket", expiresAtMs: now + 30_000 }));
+  const memberSessions = createPhoneMemberLiveSessions({
+    storage: f.storage,
+    maxSessions: 16,
+    now: () => now,
+  });
+  let sequence = 100;
+  const publish = (objectId: string, versionId = "main") =>
+    f.raw
+      .prepare(
+        "INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'desktop',?,'ydoc.update',?,2,?)",
+      )
+      .run(scope.workspaceId, sequence, JSON.stringify({ objectId, versionId }), sequence++);
+
+  // Workspace membership with per-folder rules: docs/ Edit, readonly/ View (default), private/ excluded.
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+    .run(WORKSPACE_SHARE_SELECTOR_JSON, scope.shareId);
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_share_grants SET principal_user_id='member-1', access='view' WHERE grant_id=?",
+    )
+    .run(scope.grantId);
+  f.raw
+    .prepare(
+      "INSERT INTO sync_relay_workspace_memberships (workspace_id,share_id,member_level,workspace_name,created_at_ms) VALUES (?,?,'view','Workspace',0)",
+    )
+    .run(scope.workspaceId, scope.shareId);
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_workspace_members (member_id,workspace_id,grant_id,user_id,email,role,state,invited_at_ms,joined_at_ms)
+      VALUES ('member-1',?,?,'member-1','m1@dohc.test','member','active',0,0)`,
+    )
+    .run(scope.workspaceId, scope.grantId);
+  const docsRule = f.storage.changeFolderRule({
+    workspaceId: scope.workspaceId,
+    actorUserId: "owner-1",
+    change: { kind: "create", folder: "docs", rule: parseAccessRule("members: edit\n")! },
+    nowMs: 1,
+  });
+  expect(docsRule).toMatchObject({ ok: true });
+  expect(
+    f.storage.changeFolderRule({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      change: {
+        kind: "create",
+        folder: "private",
+        rule: parseAccessRule("people:\n  other@dohc.test: edit\n")!,
+      },
+      nowMs: 2,
+    }),
+  ).toMatchObject({ ok: true });
+
+  publish(binding.objectId);
+  f.seed("readonly/spec.md", "obj-spec");
+  publish("obj-spec");
+  f.seed("readonly/unopened.md", "obj-unopened");
+  f.seed("private/secret.md", "obj-private");
+  publish("obj-private");
+  f.seed("docs/.env", "obj-env");
+  publish("obj-env");
+  f.seed("docs/.env/a.md", "obj-env-md");
+  publish("obj-env-md");
+
+  const reconcile = vi.fn();
+  const copies = vi.fn(() => undefined);
+  const pages = createPhonePages({
+    storage: f.storage,
+    history: createLiveJournalHistoryAuthority({ namespace, reconciled: true }),
+    host: { ...f.host, reconcile },
+    supported: () => true,
+    tickets: { mint: ownerMint },
+    phoneNamedTickets: { mint: memberMint },
+    phoneMemberSessions: memberSessions,
+    sessions,
+    nowMs: () => now,
+    editorLimits,
+  });
+  const hub = new DiscussionActivityHub();
+  const route = createAccountOperationRoute({
+    storage: f.storage,
+    resolveAccountSession,
+    copies,
+    nowMs: () => now,
+    limiter: new TokenBucketLimiter(1_000, 1_000, 4_096),
+    feedWaits: createAccountFeedWaits(f.storage, hub),
+    wakeWaits: createChatWakeWaits(f.storage, hub),
+    phonePages: () => pages,
+    browser: {
+      origin: SHARE_WEB,
+      hasExchangeKey: (request) =>
+        verifyRelayExchangeKey(
+          request.headers.get("x-dohc-relay-exchange-key"),
+          hashRelayExchangeKey(EXCHANGE_KEY),
+        ),
+    },
+  });
+  async function open(path: string, as = "member-1:phone-m1:phone") {
+    const response = await route(
+      new Request(`http://relay.test/sync/${scope.workspaceId}/ops/openPage`, {
+        method: "POST",
+        headers: { authorization: `Bearer session:${as}`, "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      }),
+      { route: "account-operation", workspaceId: scope.workspaceId, operation: "openPage" },
+    ).catch((error: unknown) => errorResponse(error));
+    return { status: response.status, body: (await response.json()) as unknown };
+  }
+  return {
+    ...f,
+    docsRule: docsRule as { ok: true; ruleId: string; revision: number },
+    now: () => now,
+    open,
+    ownerMint,
+    memberMint,
+    memberSessions,
+    stored,
+    copies,
+    reconcile,
+    setNow: (value: number) => {
+      now = value;
+    },
+  };
+}
+
+it("enrolls a joined member's Edit page with member-open, mints a phone-bound named session, and never touches ServerCopies", async () => {
+  const f = await joinedPhone();
+  expect(await f.open(binding.currentPath)).toEqual(preparing);
+  expect(f.storage.readServiceHostEnrollment(scope.workspaceId, binding.currentPath)).toMatchObject(
+    {
+      enabled: true,
+      ownerDemand: false,
+      objectId: binding.objectId,
+    },
+  );
+  expect(f.copies).not.toHaveBeenCalled();
+
+  f.ready();
+  const opened = await f.open(binding.currentPath);
+  expect(opened).toEqual(
+    answer({
+      status: "ready",
+      mode: "named",
+      session: expect.stringMatching(/^[A-Za-z0-9_-]{12}$/),
+      liveWorkspaceId: `named:${scope.grantId}`,
+      objectId: binding.objectId,
+      lineageClaimId: binding.lineageClaimId,
+      ticket: "member-ticket",
+      expiresAtMs: f.now() + 50,
+      editorLimits,
+    }),
+  );
+  expect(f.ownerMint).not.toHaveBeenCalled();
+  expect(f.memberMint).toHaveBeenCalledWith(
+    { objectId: binding.objectId },
+    {
+      kind: "named",
+      workspaceId: scope.workspaceId,
+      shareId: scope.shareId,
+      grantId: scope.grantId,
+      userId: "member-1",
+    },
+    expect.any(AbortSignal),
+  );
+  expect(f.copies).not.toHaveBeenCalled();
+
+  const { session } = (opened.body as { result: { session: string } }).result;
+  // Wrong session / wrong user / wrong token fail without consuming the valid entry.
+  expect(
+    f.memberSessions.take({
+      discriminator: session,
+      userId: "member-1",
+      sessionId: "phone-m2",
+      token: "member-ticket",
+    }),
+  ).toBeNull();
+  expect(
+    f.memberSessions.take({
+      discriminator: session,
+      userId: "owner-1",
+      sessionId: "phone-m1",
+      token: "member-ticket",
+    }),
+  ).toBeNull();
+  expect(
+    f.memberSessions.take({
+      discriminator: session,
+      userId: "member-1",
+      sessionId: "phone-m1",
+      token: "wrong-ticket",
+    }),
+  ).toBeNull();
+  expect(f.memberSessions.has(session)).toBe(true);
+  // Exact match succeeds once, then is consumed.
+  expect(
+    f.memberSessions.take({
+      discriminator: session,
+      userId: "member-1",
+      sessionId: "phone-m1",
+      token: "member-ticket",
+    }),
+  ).toMatchObject({
+    userId: "member-1",
+    sessionId: "phone-m1",
+    workspaceId: scope.workspaceId,
+    shareId: scope.shareId,
+    grantId: scope.grantId,
+    objectId: binding.objectId,
+    path: binding.currentPath,
+  });
+  expect(f.memberSessions.has(session)).toBe(false);
+});
+
+it("refuses Read-only pages cleanly, answers hidden and out-of-reach paths as missing, and enforces live pause and Show on phone", async () => {
+  const f = await joinedPhone();
+  expect(await f.open("readonly/spec.md")).toEqual(refused("read-only"));
+  expect(await f.open("readonly/unopened.md")).toEqual(refused("read-only"));
+  expect(await f.open("private/secret.md")).toEqual(refused("missing"));
+  expect(await f.open("docs/.env")).toEqual(refused("missing"));
+  expect(await f.open("docs/.env/a.md")).toEqual(refused("missing"));
+  expect(f.storage.listServiceHostEnrollments(scope.workspaceId)).toEqual([]);
+  expect(f.copies).not.toHaveBeenCalled();
+
+  // Desktop or browser member sessions get 404.
+  expect(await f.open(binding.currentPath, "member-1:desk-1:desktop")).toEqual(notFound);
+  expect(await f.open(binding.currentPath, "member-1:br-1:browser")).toEqual(notFound);
+
+  // Live pause returns live_paused_by_owner for a member.
+  pauseLiveRoom(f.storage as StorageContext, {
+    document: {
+      workspaceId: scope.workspaceId,
+      mainVersionId: "main",
+      objectId: binding.objectId,
+      lineageClaimId: binding.lineageClaimId,
+    },
+    cause: "refused",
+    refusal: "authority-refused",
+    named: [],
+    copy: new Uint8Array([1]),
+    pausedAtMs: 1_500,
+  });
+  expect(await f.open(binding.currentPath)).toEqual(refused("live_paused_by_owner"));
+
+  // Owner hiding the workspace on their phone does not hide it from the member; member hiding it does.
+  f.storage.setShowOnPhone({
+    userId: "owner-1",
+    workspaceId: scope.workspaceId,
+    showOnPhone: false,
+  });
+  expect(await f.open("readonly/spec.md")).toEqual(refused("read-only"));
+  f.storage.setShowOnPhone({
+    userId: "member-1",
+    workspaceId: scope.workspaceId,
+    showOnPhone: false,
+  });
+  expect(await f.open(binding.currentPath)).toEqual(notFound);
+  expect(await f.open("readonly/spec.md")).toEqual(notFound);
+});
+
+it("invalidates pending phone member sessions on stopPhoneWorkspace, stopSession, expiry, downgrade, and deleteAccount", async () => {
+  const f = await joinedPhone();
+  f.ready();
+  const mintOne = async (as = "member-1:phone-m1:phone") => {
+    const res = await f.open(binding.currentPath, as);
+    expect(res.status).toBe(200);
+    const result = (res.body as { result: { status: string; session?: string } }).result;
+    expect(result.status).toBe("ready");
+    return result.session!;
+  };
+
+  const s1 = await mintOne();
+  f.memberSessions.stopPhoneWorkspace("member-1", scope.workspaceId);
+  expect(f.memberSessions.has(s1)).toBe(false);
+
+  const s2 = await mintOne();
+  f.memberSessions.stopSession("member-1", "phone-m1");
+  expect(f.memberSessions.has(s2)).toBe(false);
+
+  const s3 = await mintOne();
+  f.memberSessions.deleteAccount("member-1", []);
+  expect(f.memberSessions.has(s3)).toBe(false);
+
+  const s4 = await mintOne();
+  const baseNow = f.now();
+  f.setNow(baseNow + 50);
+  expect(f.memberSessions.has(s4)).toBe(false);
+  f.setNow(baseNow);
+
+  // Downgrading docs/ to view refuses take() even before expiry.
+  const s5 = await mintOne();
+  expect(
+    f.storage.changeFolderRule({
+      workspaceId: scope.workspaceId,
+      actorUserId: "owner-1",
+      change: {
+        kind: "change",
+        ruleId: f.docsRule.ruleId,
+        revision: f.docsRule.revision,
+        rule: parseAccessRule("members: view\n")!,
+      },
+      nowMs: 10,
+    }),
+  ).toMatchObject({ ok: true });
+  expect(
+    f.memberSessions.take({
+      discriminator: s5,
+      userId: "member-1",
+      sessionId: "phone-m1",
+      token: "member-ticket",
+    }),
+  ).toBeNull();
 });

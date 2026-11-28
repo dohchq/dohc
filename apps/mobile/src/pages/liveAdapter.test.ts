@@ -68,7 +68,7 @@ function page(limits = liveLimits()) {
   let gen = 0;
   const provider = () => adapter.provider()!;
 
-  function connect(epoch = 1) {
+  function connect(epoch = 1, workspaceId = "ws-1") {
     const relay = createLiveFrameSession("server", policy);
     const toPage = outgoing<ToPage>(++gen, adapter.receive);
     const mine = gen;
@@ -93,7 +93,7 @@ function page(limits = liveLimits()) {
       toPage({ type: "frame", data: toBase64(lease.value) });
       lease.release();
     };
-    toPage({ type: "connect", limits, workspaceId: "ws-1", objectId: "obj-1" });
+    toPage({ type: "connect", limits, workspaceId, objectId: "obj-1" });
 
     return {
       toPage,
@@ -446,5 +446,39 @@ describe("the page's live connection", () => {
     expect(
       applyCheckedFrontmatterPatch(bigDoc, "Name", "b", { name: "Name", type: "text" }),
     ).toEqual({ ok: true, changed: true });
+  });
+
+  it("syncs edits and undo/redo for a joined member bound to named:<grantId>", async () => {
+    const t = page();
+    const memberWorkspaceId = "named:grant-42";
+    const app = t.connect(1, memberWorkspaceId);
+    const doc = document("shared start");
+    await app.sync(doc, {
+      ...binding,
+      workspaceId: memberWorkspaceId,
+      currentPath: "shared/plan.md",
+      selectorPaths: ["shared/plan.md"],
+    });
+    expect(t.provider().state()).toMatchObject({ status: "live", pendingUpdates: 0 });
+
+    const body = getDohcYDocBodyFragment(t.provider().doc);
+    const undo = new Y.UndoManager(body, { captureTimeout: 0 });
+    type(t.provider(), " + member");
+    await vi.waitFor(() => expect(app.submissions).toHaveLength(1));
+    app.ack(app.submissions[0]!);
+    await vi.waitFor(() => expect(t.provider().state().pendingUpdates).toBe(0));
+    expect(body.toString()).toContain("shared start + member");
+
+    undo.undo();
+    await vi.waitFor(() => expect(app.submissions).toHaveLength(2));
+    app.ack(app.submissions[1]!);
+    await vi.waitFor(() => expect(t.provider().state().pendingUpdates).toBe(0));
+    expect(body.toString()).not.toContain("+ member");
+
+    undo.redo();
+    await vi.waitFor(() => expect(app.submissions).toHaveLength(3));
+    app.ack(app.submissions[2]!);
+    await vi.waitFor(() => expect(t.provider().state().pendingUpdates).toBe(0));
+    expect(body.toString()).toContain("shared start + member");
   });
 });

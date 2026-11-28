@@ -234,7 +234,7 @@ export function createAccountOperationRoute(options: {
     )
       throw copiesUnavailable();
     const joinedAllowed =
-      feed || app || collection || memberWrite || isAccountOperation(route.operation);
+      feed || app || collection || page || memberWrite || isAccountOperation(route.operation);
     const owner = storage.workspaceOwner(route.workspaceId);
     const reaches = (userId: string) => {
       if (browser) return storage.workspaceIsOwnedBy(route.workspaceId, userId);
@@ -394,6 +394,7 @@ export function createAccountOperationRoute(options: {
       const result = pages
         ? await pages.open({
             caller,
+            member,
             workspaceId: route.workspaceId,
             args,
             authorize,

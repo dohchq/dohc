@@ -3,19 +3,28 @@ import { readLimits } from "../pages/liveBridge";
 import { isFields, okAnswer, segment, text } from "./api";
 import type { ServerClient } from "./client";
 
-// The account operation that opens a page to edit it live. `ready` carries a one-use ticket for the page's owner
+// The account operation that opens a page to edit it live. `ready` carries a one-use ticket for the page's live
 // connection: it stays in this answer and the socket's protocols, never in the web view, a URL or a log.
 
+interface ReadyBase {
+  readonly status: "ready";
+  readonly objectId: string;
+  readonly lineageClaimId: string;
+  readonly ticket: string;
+  readonly limits: NamedLiveBrowserLimits;
+}
+
 export type PageOpen =
-  | {
-      readonly status: "ready";
-      readonly objectId: string;
-      readonly lineageClaimId: string;
-      readonly ticket: string;
-      readonly limits: NamedLiveBrowserLimits;
-    }
+  | (ReadyBase & { readonly mode: "owner" })
+  | (ReadyBase & {
+      readonly mode: "named";
+      readonly session: string;
+      readonly liveWorkspaceId: string;
+    })
   | { readonly status: "preparing" }
   | { readonly status: "refused"; readonly reason: string };
+
+const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/;
 
 function readOpen(body: unknown): PageOpen | null {
   const result = okAnswer(body)?.result;
@@ -25,18 +34,33 @@ function readOpen(body: unknown): PageOpen | null {
     return text(result.reason, 128) ? { status: "refused", reason: result.reason } : null;
   }
   const limits = readLimits(result.editorLimits);
-  return result.status === "ready" &&
-    text(result.objectId, 256) &&
-    text(result.lineageClaimId, 256) &&
-    text(result.ticket, 1024) &&
-    limits
-    ? {
-        status: "ready",
-        objectId: result.objectId,
-        lineageClaimId: result.lineageClaimId,
-        ticket: result.ticket,
-        limits,
-      }
+  if (
+    result.status !== "ready" ||
+    !text(result.objectId, 256) ||
+    !text(result.lineageClaimId, 256) ||
+    !text(result.ticket, 1024) ||
+    !limits
+  )
+    return null;
+  const base = {
+    status: "ready" as const,
+    objectId: result.objectId,
+    lineageClaimId: result.lineageClaimId,
+    ticket: result.ticket,
+    limits,
+  };
+  if (result.mode === "named") {
+    return typeof result.session === "string" &&
+      SESSION_DISCRIMINATOR.test(result.session) &&
+      text(result.liveWorkspaceId, 256) &&
+      result.liveWorkspaceId.startsWith("named:")
+      ? { ...base, mode: "named", session: result.session, liveWorkspaceId: result.liveWorkspaceId }
+      : null;
+  }
+  return (result.mode === undefined || result.mode === "owner") &&
+    result.session === undefined &&
+    result.liveWorkspaceId === undefined
+    ? { ...base, mode: "owner" }
     : null;
 }
 

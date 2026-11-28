@@ -232,6 +232,61 @@ describe("opening", () => {
     expect(everything).not.toContain("ticket");
   });
 
+  it("opens a joined member's named live socket and passes named:<grantId> to the web view without leaking ticket or session", async () => {
+    const SESSION = "AbCdEf123456";
+    const namedReady = answer({
+      status: "ready",
+      mode: "named",
+      session: SESSION,
+      liveWorkspaceId: "named:grant-42",
+      objectId: "obj-1",
+      lineageClaimId: "claim-1",
+      ticket: TICKET,
+      expiresAtMs: 1,
+      editorLimits: liveLimits(),
+    });
+    const t = await connected(namedReady);
+    const [opened] = t.sockets;
+    expect(opened!.url).toBe(`wss://dohc.example.com/sync/live/phone?session=${SESSION}`);
+    expect(opened!.protocols).toEqual(["dohc-live-v1", `dohc-live-ticket.${TICKET}`]);
+    expect(opened!.headers).toEqual({ authorization: `Bearer ${TOKEN}` });
+    expect(t.posted[0]).toMatchObject({
+      type: "connect",
+      gen: 1,
+      seq: 1,
+      workspaceId: "named:grant-42",
+      objectId: "obj-1",
+    });
+    const everything = JSON.stringify(t.posted);
+    expect(everything).not.toContain(TOKEN);
+    expect(everything).not.toContain(TICKET);
+    expect(everything).not.toContain(SESSION);
+  });
+
+  it("rejects malformed named or mixed owner PageOpen payloads as invalid", async () => {
+    const base = {
+      status: "ready",
+      objectId: "obj-1",
+      lineageClaimId: "claim-1",
+      ticket: TICKET,
+      expiresAtMs: 1,
+      editorLimits: liveLimits(),
+    };
+    for (const bad of [
+      answer({ ...base, mode: "named", session: "short", liveWorkspaceId: "named:grant-1" }),
+      answer({ ...base, mode: "named", session: "AbCdEf123456", liveWorkspaceId: "ws-1" }),
+      answer({ ...base, mode: "named", session: "AbCdEf123456" }),
+      answer({ ...base, mode: "owner", session: "AbCdEf123456" }),
+      answer({ ...base, liveWorkspaceId: "named:grant-1" }),
+    ]) {
+      const t = setup(bad);
+      t.live.start();
+      await vi.waitFor(() => expect(t.live.state().phase).toBe("lost"));
+      expect(t.live.state().reason).toBe("invalid");
+      expect(t.sockets).toEqual([]);
+    }
+  });
+
   it("lets go of the sign-in once its socket closes", async () => {
     const t = await connected();
     t.live.end();
@@ -266,6 +321,9 @@ describe("the save mark", () => {
       "readOnlySetAside",
     );
     expect(liveMark(state("refused", null, "paused"))).toBe("readOnlyRefused");
+    expect(liveMark(state("refused", null, "read-only"))).toBe("readOnlyShared");
+    expect(liveMark(state("refused", null, "live_paused_by_owner"))).toBe("readOnlyPausedByOwner");
+    expect(liveMark(state("refused", null, "authority-refused"))).toBe("readOnlyEnded");
     expect(liveMark(state("ended", null))).toBe("readOnlyPhone");
   });
 

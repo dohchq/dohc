@@ -302,6 +302,8 @@ export function captureNamedLiveFrameHost(options: {
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
   fresh?: PersonalFreshRead;
+  guard?: () => void;
+  personOnly?: boolean;
 }): NamedFrameRoomHost & { readonly ticket: RedeemedLiveTicket } {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
@@ -826,6 +828,7 @@ function captureLiveFrameHost(options: {
         const authorContext =
           context === undefined || freshRead ? undefined : parseLiveAuthorContext(context);
         if (claimsPersonalAgent(authorContext)) return null;
+        if (options.personOnly && authorContext?.agent) return null;
         const snapshot =
           authority.principalKind === "personal"
             ? personalLiveAuthorSnapshot(storage as StorageContext, authority)

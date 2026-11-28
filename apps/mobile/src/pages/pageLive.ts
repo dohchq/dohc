@@ -176,11 +176,15 @@ export function createPageLive(options: {
 
   function connect(answer: Extract<PageOpen, { status: "ready" }>) {
     const held = open!;
-    const query = `objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
-    const socket = options.client.liveSocket(
-      `/sync/workspaces/${segment(options.workspaceId)}/live/owner?${query}`,
-      ["dohc-live-v1", `dohc-live-ticket.${answer.ticket}`],
-    );
+    const socketPath =
+      answer.mode === "named"
+        ? `/sync/live/phone?session=${encodeURIComponent(answer.session)}`
+        : `/sync/workspaces/${segment(options.workspaceId)}/live/owner?objectId=${encodeURIComponent(answer.objectId)}&lineageClaimId=${encodeURIComponent(answer.lineageClaimId)}`;
+    const liveWorkspaceId = answer.mode === "named" ? answer.liveWorkspaceId : options.workspaceId;
+    const socket = options.client.liveSocket(socketPath, [
+      "dohc-live-v1",
+      `dohc-live-ticket.${answer.ticket}`,
+    ]);
     held.socket = socket;
     socket.binaryType = "arraybuffer";
     const frames = answer.limits.provider.frames;
@@ -202,7 +206,7 @@ export function createPageLive(options: {
       next.toPage({
         type: "connect",
         limits: answer.limits,
-        workspaceId: options.workspaceId,
+        workspaceId: liveWorkspaceId,
         objectId: answer.objectId,
       });
     };
@@ -313,7 +317,13 @@ export function liveMark(state: PageLiveState): MarkKey {
         ? "readOnlySetAside"
         : state.reason === "live-document-without-lineage"
           ? "readOnlyNeedsComputer"
-          : "readOnlyRefused";
+          : state.reason === "read-only"
+            ? "readOnlyShared"
+            : state.reason === "live_paused_by_owner"
+              ? "readOnlyPausedByOwner"
+              : state.reason === "authority-refused"
+                ? "readOnlyEnded"
+                : "readOnlyRefused";
     case "ended":
       return "readOnlyPhone";
   }

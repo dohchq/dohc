@@ -40,7 +40,7 @@ import {
 } from "../server/fileWrites";
 import type { RecordValue } from "../server/phoneCollections";
 import { documentCollectionWrites } from "../server/phoneDocumentCollections";
-import { writesIn } from "../server/phoneWrites";
+import { phoneWrites } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { TOUCH } from "../touch";
@@ -249,10 +249,8 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     };
   }, [attempt]);
 
-  // With phone writes on, the page opens live once its web view has drawn the text read (pageHost). A page the sign-in
-  // or workspace ended (appTeardown) stays read-only.
-  const editsLive =
-    writesIn(data) && state.value?.kind === "page" && data !== null && !stopped && !mutating;
+  const canOpenLive = phoneWrites && data !== null;
+  const editsLive = canOpenLive && state.value?.kind === "page" && !stopped && !mutating;
   const liveState = useSyncExternalStore(
     live?.subscribe ?? noSession,
     live?.state ?? (() => NO_STATE),
@@ -489,7 +487,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
         ? pageScript(
             path,
             markdown,
-            writesIn(data),
+            canOpenLive,
             propertyFields,
             propertiesEditable,
             relationLabels,
@@ -573,7 +571,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
           : pageScript(
               path,
               markdown,
-              writesIn(data),
+              canOpenLive,
               propertyFields,
               propertiesEditable,
               relationLabels,
@@ -595,7 +593,8 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   // What stopped editing, under the header, with Try again when another open may work.
   const lostReason = liveState.phase === "lost" ? liveState.reason : null;
   const liveStrip =
-    liveState.phase === "refused" ? (
+    liveState.phase === "refused" &&
+    (liveState.reason !== "read-only" || liveState.shown || liveState.unsent) ? (
       <Strip theme={theme} icon="lock" text={explanationOf(markKey)} />
     ) : lostReason !== null ? (
       <Strip

@@ -1,4 +1,14 @@
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
+import { createHash, createHmac } from "node:crypto";
+import {
+  UnauthorizedError,
+  type ResolveAccountSession,
+  type StoredAccountSession,
+} from "@dohc/workspace-auth/session";
+import { createLiveTickets } from "./liveTickets.js";
+import { createLiveHostReports } from "./namedLiveHostReports";
+import { createPhoneMemberLiveSessions } from "./phonePages";
 import {
   chatChannelCreate,
   chatMessageAppend,
@@ -18,7 +28,6 @@ import { fenceAccount, initializeAccountDeletion } from "./storage/accountDeleti
 import type { StorageContext } from "./storage/context.js";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { once } from "node:events";
-import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -3127,4 +3136,458 @@ describe("desktop account session standing", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("a joined member's phone", () => {
+  async function memberPhoneFixture(
+    options: {
+      routeLimits?: typeof limits;
+      validate?: Parameters<typeof createNamedLiveRoutes>[0]["validate"];
+      rooms?: LiveRooms;
+    } = {},
+  ) {
+    const f = await fixture(options.routeLimits ?? limits, false, undefined, false, true);
+    const phoneKey = createHmac("sha256", key).update("dohc-phone-named-live-ticket").digest();
+    const phoneTickets = createLiveTickets({
+      storage: f.storage,
+      audience,
+      key: phoneKey,
+      hostReports: createLiveHostReports({
+        storage: f.storage,
+        captureNative: f.captureNative,
+      }),
+    });
+    const phoneSessions = createPhoneMemberLiveSessions({
+      storage: f.storage,
+      maxSessions: 16,
+      now: () => 1000,
+    });
+    const sessionRows = new Map<string, StoredAccountSession>([
+      ["phone-1", { userId: scope.userId, expiresAtMs: 8e12, clientKind: "phone" }],
+      ["phone-2", { userId: scope.userId, expiresAtMs: 8e12, clientKind: "phone" }],
+      ["other-phone", { userId: "other-user", expiresAtMs: 8e12, clientKind: "phone" }],
+    ]);
+    const readSessions = vi.fn(
+      async (ids: readonly string[]) =>
+        new Map(
+          ids.flatMap((id): Array<[string, StoredAccountSession]> => {
+            const row = sessionRows.get(id);
+            return row ? [[id, row]] : [];
+          }),
+        ),
+    );
+    const resolveAccountSession: ResolveAccountSession = vi.fn(async (req) => {
+      const match = /^Bearer session:([\w-]+):([\w-]+):(phone|desktop|browser)$/u.exec(
+        req.headers.get("authorization") ?? "",
+      );
+      if (!match) throw new UnauthorizedError();
+      const row = sessionRows.get(match[2]!);
+      return {
+        userId: match[1]!,
+        sessionId: match[2]!,
+        expiresAtMs: row?.expiresAtMs ?? 8e12,
+        clientKind: match[3] as "phone" | "desktop" | "browser",
+      };
+    });
+    const phoneRoutes = createNamedLiveRoutes({
+      kind: "named",
+      phoneBearer: true,
+      resolveAccountSession,
+      accountSessions: { read: readSessions },
+      phoneSessions,
+      storage: f.storage,
+      hosts: new Set([relayHost]),
+      publicOrigin: audience,
+      exchangeKey: "test-exchange-key-".repeat(3),
+      limits: options.routeLimits ?? limits,
+      frames,
+      bounds,
+      validate: options.validate ?? createLiveMarkdownJournalValidator(policy),
+      tickets: phoneTickets,
+      captureNative: f.captureNative,
+      ...(options.rooms ? { rooms: options.rooms } : {}),
+    });
+    const server = createServer();
+    server.on("upgrade", (req, socket, head) => {
+      void phoneRoutes.handleUpgrade(req, socket, head).catch(() => socket.destroy());
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    cleanups.push(async () => {
+      phoneRoutes.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    async function mintMember(
+      overrides: {
+        userId?: string;
+        sessionId?: string;
+        objectId?: string;
+        lineageClaimId?: string;
+        path?: string;
+      } = {},
+    ) {
+      const minted = (await phoneTickets.mint(
+        { objectId: overrides.objectId ?? binding.objectId },
+        {
+          kind: "named",
+          workspaceId: scope.workspaceId,
+          shareId: scope.shareId,
+          grantId: scope.grantId,
+          userId: overrides.userId ?? scope.userId,
+        },
+      ))!;
+      const created = phoneSessions.create({
+        userId: overrides.userId ?? scope.userId,
+        sessionId: overrides.sessionId ?? "phone-1",
+        workspaceId: scope.workspaceId,
+        shareId: scope.shareId,
+        grantId: scope.grantId,
+        objectId: overrides.objectId ?? binding.objectId,
+        lineageClaimId: overrides.lineageClaimId ?? binding.lineageClaimId,
+        path: overrides.path ?? binding.currentPath,
+        token: minted.token,
+        expiresAtMs: minted.expiresAtMs,
+      })!;
+      return { token: minted.token, discriminator: created.discriminator };
+    }
+
+    function connectPhone(
+      token: string,
+      discriminator: string,
+      headers: Record<string, string> = {},
+    ) {
+      const ws = new WebSocket(
+        `ws://127.0.0.1:${port}/sync/live/phone?session=${discriminator}`,
+        token ? ["dohc-live-v1", `dohc-live-ticket.${token}`] : ["dohc-live-v1"],
+        {
+          headers: {
+            host: relayHost,
+            authorization: `Bearer session:${scope.userId}:phone-1:phone`,
+            ...headers,
+          },
+        },
+      );
+      cleanups.push(async () => {
+        ws.terminate();
+      });
+      const frameSession = createLiveFrameSession("client", frames);
+      const received: LiveFrame[] = [];
+      let syncCursor: number | null = null;
+      let resolveStatus!: (code: number) => void;
+      const status = new Promise<number>((resolve) => {
+        resolveStatus = resolve;
+      });
+      const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
+      ws.once("upgrade", () => resolveStatus(101));
+      ws.once("unexpected-response", (_req, res) => {
+        res.resume();
+        resolveStatus(res.statusCode ?? 0);
+      });
+      ws.on("error", () => {});
+      ws.on("message", (data: Buffer) => {
+        const decoded = frameSession.receive(new Uint8Array(data));
+        received.push(decoded.value.frame);
+        if (decoded.value.transfer?.value.begin.purpose === "initial-sync")
+          syncCursor = decoded.value.transfer.value.begin.appliedThroughJournalCursor;
+        decoded.value.transfer?.release();
+        decoded.release();
+      });
+      const send = (frame: LiveFrame) => {
+        const lease = frameSession.send(frame);
+        ws.send(lease.value);
+        lease.release();
+      };
+      const until = (predicate: () => boolean) =>
+        vi.waitFor(() => expect(predicate()).toBe(true), { timeout: 5_000, interval: 10 });
+      return { ws, status, closed, received, send, until, syncCursor: () => syncCursor };
+    }
+
+    return {
+      ...f,
+      phoneTickets,
+      phoneSessions,
+      phoneRoutes,
+      sessionRows,
+      readSessions,
+      resolveAccountSession,
+      mintMember,
+      connectPhone,
+    };
+  }
+
+  it("validates phoneBearer route options strictly", async () => {
+    const f = await fixture(limits, false, undefined, false, true);
+    const phoneSessions = createPhoneMemberLiveSessions({ storage: f.storage, maxSessions: 4 });
+    const base = {
+      kind: "named" as const,
+      storage: f.storage,
+      hosts: new Set([relayHost]),
+      publicOrigin: audience,
+      exchangeKey: "test-exchange-key-".repeat(3),
+      limits,
+      frames,
+      bounds,
+      validate: createLiveMarkdownJournalValidator(policy),
+      tickets: f.tickets,
+      captureNative: f.captureNative,
+    };
+    expect(() =>
+      createNamedLiveRoutes({
+        ...base,
+        desktopBearer: true,
+        phoneBearer: true,
+        sessions: f.desktopAdmission!,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      createNamedLiveRoutes({
+        ...base,
+        phoneBearer: true,
+        resolveAccountSession: f.accountSession,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      createNamedLiveRoutes({ ...base, sessions: f.desktopAdmission!, phoneSessions }),
+    ).toThrow(TypeError);
+  });
+
+  it("opens on /sync/live/phone, isolates tickets across sessions/users/routes, rejects agent claims, and never leaks secrets", async () => {
+    const f = await memberPhoneFixture();
+    const logs = (["log", "info", "warn", "error", "debug"] as const).map((level) =>
+      vi.spyOn(console, level),
+    );
+    const { token, discriminator } = await f.mintMember();
+
+    // Unknown discriminator fails before resolving account session.
+    expect(await f.connectPhone(token, "unknown12345").status).toBe(404);
+    expect(f.resolveAccountSession).not.toHaveBeenCalled();
+
+    // Wrong phone session, wrong user, desktop/browser token, cookie, and desktop ticket are refused without consuming the valid session.
+    expect(
+      await f.connectPhone(token, discriminator, {
+        authorization: `Bearer session:${scope.userId}:phone-2:phone`,
+      }).status,
+    ).toBe(404);
+    expect(
+      await f.connectPhone(token, discriminator, {
+        authorization: "Bearer session:other-user:other-phone:phone",
+      }).status,
+    ).toBe(404);
+    expect(
+      await f.connectPhone(token, discriminator, {
+        authorization: `Bearer session:${scope.userId}:phone-1:desktop`,
+      }).status,
+    ).toBe(404);
+    expect(
+      await f.connectPhone(token, discriminator, {
+        cookie: "account=reader",
+      }).status,
+    ).toBe(404);
+    const desktopTicket = await f.mint();
+    expect(await f.connectPhone(desktopTicket.token, discriminator).status).toBe(404);
+    // Phone ticket cannot redeem on the desktop route either.
+    expect(await f.connect(token).status).toBe(404);
+
+    // Valid matching phone session succeeds once, then discriminator & ticket cannot be reused.
+    const client = f.connectPhone(token, discriminator);
+    expect(await client.status).toBe(101);
+    await client.until(() => client.received.some((frame) => frame.kind === "welcome"));
+    expect(await f.connectPhone(token, discriminator).status).toBe(404);
+    expect(JSON.stringify(logs.flatMap((log) => log.mock.calls))).not.toContain(token);
+
+    // Open sync and attempt to spoof an agent authorContext -> provenance-refused (personOnly).
+    client.send({ kind: "hello", receivePolicy: frames.receive });
+    client.send({
+      kind: "credit",
+      grantedBytes: frames.maxQueuedBytes,
+      grantedFrames: frames.maxQueuedFrames,
+    });
+    await client.until(() => client.received.some((frame) => frame.kind === "credit"));
+    const emptyVec = Y.encodeStateVector(new Y.Doc());
+    client.send({
+      kind: "begin",
+      purpose: "client-vector",
+      transferId: 1,
+      totalBytes: emptyVec.length,
+      digest: createHash("sha256").update(emptyVec).digest("hex"),
+    });
+    client.send({ kind: "chunk", transferId: 1, offset: 0, bytes: emptyVec });
+    await client.until(() => client.syncCursor() !== null);
+    client.send({ kind: "sync-applied", appliedThroughJournalCursor: client.syncCursor()! });
+
+    const doc = new Y.Doc();
+    doc.getText("x").insert(0, "spoof");
+    const update = Y.encodeStateAsUpdate(doc);
+    client.send({
+      kind: "begin",
+      purpose: "submit-update",
+      transferId: 2,
+      totalBytes: update.length,
+      digest: createHash("sha256").update(update).digest("hex"),
+      deliveryId: "del-spoof-1",
+      authorContext: {
+        kind: "account",
+        accountId: scope.userId,
+        agent: { agentId: "fake-agent", agentName: "Fake" },
+      } satisfies LiveAuthorContext,
+    });
+    client.send({ kind: "chunk", transferId: 2, offset: 0, bytes: update });
+    await client.until(() =>
+      client.received.some(
+        (frame) =>
+          frame.kind === "result" &&
+          frame.result === "refused" &&
+          frame.reason === "provenance-refused",
+      ),
+    );
+  });
+
+  it("registers the phone socket before redeeming the ticket so mid-upgrade Show on phone off aborts immediately", async () => {
+    const f = await memberPhoneFixture();
+    const { token, discriminator } = await f.mintMember();
+    f.captureNative.mockClear();
+    let releaseRedeem!: () => void;
+    const redeemEntered = new Promise<void>((resolve) => {
+      const originalRedeem = f.phoneTickets.redeem.bind(f.phoneTickets);
+      vi.spyOn(f.phoneTickets, "redeem").mockImplementationOnce(async (tok, ctx, sig) => {
+        resolve();
+        await new Promise<void>((done) => {
+          releaseRedeem = done;
+        });
+        return originalRedeem(tok, ctx, sig);
+      });
+    });
+    const client = f.connectPhone(token, discriminator);
+    await redeemEntered;
+    f.phoneRoutes.stopPhoneWorkspace(scope.userId, scope.workspaceId);
+    releaseRedeem();
+    expect(await client.status).toBe(404);
+    expect(f.captureNative).not.toHaveBeenCalled();
+  });
+
+  it.each(["showOnPhone-off", "grant-revoked", "folder-downgraded"] as const)(
+    "closes immediately and refuses an in-flight frame commit on %s",
+    async (cause) => {
+      let releaseValidation!: () => void;
+      let validationEntered!: () => void;
+      const inFlight = new Promise<void>((resolve) => {
+        validationEntered = resolve;
+      });
+      const realValidate = createLiveMarkdownJournalValidator(policy);
+      const f = await memberPhoneFixture({
+        validate: async (input, signal) => {
+          validationEntered();
+          await new Promise<void>((resolve) => {
+            releaseValidation = resolve;
+            signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return realValidate(input);
+        },
+      });
+      const stopObserving = observeRelayWrites(f.storage, (documents) =>
+        f.changes.notifyWrite(documents),
+      );
+      cleanups.push(async () => stopObserving());
+      if (cause === "folder-downgraded") {
+        f.raw
+          .prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id=?")
+          .run(WORKSPACE_SHARE_SELECTOR_JSON, scope.shareId);
+        f.raw
+          .prepare(
+            "INSERT INTO sync_relay_workspace_memberships (workspace_id,share_id,member_level,workspace_name,created_at_ms) VALUES (?,?,'edit','Workspace',0)",
+          )
+          .run(scope.workspaceId, scope.shareId);
+        f.raw
+          .prepare(
+            `INSERT INTO sync_relay_workspace_members (member_id,workspace_id,grant_id,user_id,email,role,state,invited_at_ms,joined_at_ms)
+            VALUES ('member-1',?,?,?,'r@dohc.test','member','active',0,0)`,
+          )
+          .run(scope.workspaceId, scope.grantId, scope.userId);
+      }
+
+      const { token, discriminator } = await f.mintMember();
+      const client = f.connectPhone(token, discriminator);
+      expect(await client.status).toBe(101);
+      await client.until(() => client.received.some((frame) => frame.kind === "welcome"));
+
+      client.send({ kind: "hello", receivePolicy: frames.receive });
+      client.send({
+        kind: "credit",
+        grantedBytes: frames.maxQueuedBytes,
+        grantedFrames: frames.maxQueuedFrames,
+      });
+      await client.until(() => client.received.some((frame) => frame.kind === "credit"));
+      const emptyVec = Y.encodeStateVector(new Y.Doc());
+      client.send({
+        kind: "begin",
+        purpose: "client-vector",
+        transferId: 1,
+        totalBytes: emptyVec.length,
+        digest: createHash("sha256").update(emptyVec).digest("hex"),
+      });
+      client.send({ kind: "chunk", transferId: 1, offset: 0, bytes: emptyVec });
+      await client.until(() => client.syncCursor() !== null);
+      client.send({ kind: "sync-applied", appliedThroughJournalCursor: client.syncCursor()! });
+
+      const beforeJournal = (
+        f.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_live_update_journal WHERE workspace_id=? AND object_id=?",
+          )
+          .get(scope.workspaceId, binding.objectId) as { count: number }
+      ).count;
+
+      const doc = new Y.Doc();
+      doc.getXmlFragment("body").insert(0, [new Y.XmlElement("paragraph")]);
+      const update = Y.encodeStateAsUpdate(doc);
+      client.send({
+        kind: "begin",
+        purpose: "submit-update",
+        transferId: 2,
+        totalBytes: update.length,
+        digest: createHash("sha256").update(update).digest("hex"),
+        deliveryId: `del-race-${cause}`,
+      });
+      client.send({ kind: "chunk", transferId: 2, offset: 0, bytes: update });
+      await inFlight;
+
+      if (cause === "showOnPhone-off") {
+        f.storage.setShowOnPhone({
+          userId: scope.userId,
+          workspaceId: scope.workspaceId,
+          showOnPhone: false,
+        });
+        f.phoneRoutes.stopPhoneWorkspace(scope.userId, scope.workspaceId);
+      } else if (cause === "grant-revoked") {
+        expect(
+          f.storage.revokeShareGrant({
+            shareId: scope.shareId,
+            grantId: scope.grantId,
+            revokedAtMs: 5000,
+          }).ok,
+        ).toBe(true);
+      } else {
+        (f.storage as StorageContext).tx(() =>
+          (f.storage as StorageContext).db
+            .prepare(
+              `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','members: view\n',100,NULL)`,
+            )
+            .run(scope.workspaceId),
+        );
+      }
+      releaseValidation();
+      await client.closed;
+
+      const afterJournal = (
+        f.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM sync_relay_live_update_journal WHERE workspace_id=? AND object_id=?",
+          )
+          .get(scope.workspaceId, binding.objectId) as { count: number }
+      ).count;
+      expect(afterJournal).toBe(beforeJournal);
+    },
+  );
 });
