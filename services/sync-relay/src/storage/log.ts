@@ -155,7 +155,9 @@ function ydocRecovery(payloadJson: string) {
     objectId: payload.objectId,
     momentId: payload.momentId,
     versionId: String(payload.versionId),
-    path: String(payload.payloadAfterPath),
+    before: continuation
+      ? { path: String(payload.payloadBeforePath), sha256: payload.beforeBlobSha256 as string }
+      : null,
     key: stableJsonStringify([
       payload.versionId,
       payload.objectId,
@@ -259,7 +261,6 @@ export function appendLogBatchInTransaction(
   // The log's first accepted creation of a copy is its only projected one,
   // so the first object moment with its ID names it, on every retry alike.
   const redundant = new Map<number, RedundantRecovery>();
-  const duplicateRecoveries = new Set<number>();
   const firstCreationStmt = storage.db.prepare(
     `SELECT l.origin_id, l.origin_seq, l.relay_seq, l.payload_json
      FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq = m.relay_seq
@@ -267,31 +268,37 @@ export function appendLogBatchInTransaction(
        AND l.op_kind = 'moment.append' AND l.relay_admission IS NULL
      ORDER BY m.relay_seq LIMIT 1`,
   );
-  const placedOrChangedStmt = storage.db.prepare(
-    `SELECT 1 WHERE EXISTS (SELECT 1 FROM sync_relay_current_files
-         WHERE workspace_id = ? AND version_id = ? AND path = ? AND state_relay_seq = ?)
-       OR EXISTS (SELECT 1 FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq > ?)`,
+  const changedStmt = storage.db.prepare(
+    `SELECT 1 FROM sync_relay_object_moments WHERE workspace_id = ? AND object_id = ? AND relay_seq > ?
+       AND moment_id NOT LIKE '${RECOVERY_MOMENT_PREFIX}%' AND moment_id NOT LIKE '${INACTIVE_RECOVERY_MOMENT_PREFIX}%'
+     LIMIT 1`,
   );
-  const classifyRecovery = (op: SyncRelayLogInput) => {
-    if (op.opKind !== "moment.append") return;
+  const placedStmt = storage.db.prepare(
+    `SELECT 1 FROM sync_relay_object_moments m JOIN sync_relay_current_files f
+       ON f.workspace_id = m.workspace_id AND f.version_id = m.version_id AND f.path = m.path AND f.state_relay_seq = m.relay_seq
+     WHERE m.workspace_id = ? AND m.object_id = ? LIMIT 1`,
+  );
+  const continuesStmt = storage.db.prepare(
+    `SELECT 1 FROM sync_relay_current_files f JOIN sync_relay_object_moments m
+       ON m.workspace_id = f.workspace_id AND m.object_id = ? AND m.relay_seq = f.state_relay_seq
+     WHERE f.workspace_id = ? AND f.version_id = ? AND f.path = ? AND f.blob_sha256 = ?`,
+  );
+  const duplicateRecovery = (op: SyncRelayLogInput) => {
+    if (op.opKind !== "moment.append") return false;
     const recovery = ydocRecovery(op.payloadJson);
-    if (!recovery) return;
+    if (!recovery) return false;
     const found = firstCreationStmt.get(input.workspaceId, recovery.objectId, recovery.momentId);
     const first = found && ydocRecovery(String(found.payload_json));
-    if (!first || first.key !== recovery.key) return;
-    const firstSeq = Number(found.relay_seq);
-    if (
-      placedOrChangedStmt.get(
-        input.workspaceId,
-        first.versionId,
-        first.path,
-        firstSeq,
-        input.workspaceId,
-        recovery.objectId,
-        firstSeq,
-      )
-    )
-      duplicateRecoveries.add(op.originSeq);
+    if (!first || first.key !== recovery.key) return false;
+    if (changedStmt.get(input.workspaceId, recovery.objectId, Number(found.relay_seq))) return true;
+    if (!recovery.before) return placedStmt.get(input.workspaceId, recovery.objectId) !== undefined;
+    return !continuesStmt.get(
+      recovery.objectId,
+      input.workspaceId,
+      recovery.versionId,
+      recovery.before.path,
+      recovery.before.sha256,
+    );
   };
   const classify = (op: SyncRelayLogInput) => {
     if (!input.classifyRedundantRecoveries || op.opKind !== "moment.append") return;
@@ -363,7 +370,6 @@ export function appendLogBatchInTransaction(
     }
     currentMax = op.originSeq;
     classify(op);
-    classifyRecovery(op);
     newOps.push(op);
     addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
     if (op.admittedAuthorSnapshot !== undefined) {
@@ -501,7 +507,7 @@ export function appendLogBatchInTransaction(
       op.settlementAdmission?.status === "refused" ||
       op.relayAdmission !== undefined ||
       redundant.has(op.originSeq) ||
-      duplicateRecoveries.has(op.originSeq)
+      duplicateRecovery(op)
     )
       continue;
     if (op.opKind === "chat.message.append") chatMessages.push(Number(result.lastInsertRowid));
