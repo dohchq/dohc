@@ -1,58 +1,13 @@
-import { dump } from "js-yaml";
 import {
   chosenOptionColor,
+  serializeCollectionSchema,
   type CollectionSchema,
   type FieldDefinition,
   type OptionColor,
   type ViewDefinition,
 } from "@dohc/workspace-contracts";
 
-// Pure schema-model operations behind the collection authoring UI. Every
-// mutation returns a new CollectionSchema; serializeCollectionSchema turns it
-// into the exact YAML shape parseCollectionSchema reads (fields as a mapping
-// keyed by name, views as a sequence, optional keys omitted when unset).
-// Callers validate names before mutating; these functions assume valid input.
-
-function fieldEntry(field: FieldDefinition): Record<string, unknown> {
-  switch (field.type) {
-    case "select":
-    case "multi-select":
-      return {
-        type: field.type,
-        options: field.options,
-        ...keptColors(field.options, field.colors),
-      };
-    case "relation":
-      return { type: field.type, collection: field.collection, many: field.many };
-    default:
-      return { type: field.type };
-  }
-}
-
-function viewEntry(view: ViewDefinition): Record<string, unknown> {
-  const entry: Record<string, unknown> = { name: view.name, kind: view.kind };
-  if (view.groupBy !== null) entry.groupBy = view.groupBy;
-  if (view.sort.length > 0) {
-    entry.sort = view.sort.map((clause) => ({
-      field: clause.field,
-      direction: clause.direction,
-    }));
-  }
-  if (view.visibleFields !== null) entry.visibleFields = view.visibleFields;
-  if (view.dateField !== null) entry.dateField = view.dateField;
-  return entry;
-}
-
-export function serializeCollectionSchema(schema: CollectionSchema): string {
-  const document: Record<string, unknown> = { version: 1 };
-  if (schema.name !== null) document.name = schema.name;
-  if (schema.description !== null) document.description = schema.description;
-  document.fields = Object.fromEntries(
-    schema.fields.map((field) => [field.name, fieldEntry(field)]),
-  );
-  if (schema.views.length > 0) document.views = schema.views.map(viewEntry);
-  return dump(document, { lineWidth: -1, sortKeys: false });
-}
+export { serializeCollectionSchema };
 
 export function addField(schema: CollectionSchema, field: FieldDefinition): CollectionSchema {
   return { ...schema, fields: [...schema.fields, field] };

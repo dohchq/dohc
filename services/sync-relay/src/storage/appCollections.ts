@@ -112,12 +112,12 @@ function schema(
   if (!checked.ok) throw badRequest(checked.message);
   return checked.value;
 }
-function boundedBlob(
+export function readBoundedRelayBlob(
   storage: StorageContext,
   workspaceId: string,
   hash: string,
   limit: number,
-): Uint8Array {
+): Uint8Array | null {
   const row = storage.db
     .prepare(
       "SELECT byte_length,length(content) AS actual FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?",
@@ -130,9 +130,19 @@ function boundedBlob(
     Number(row.byte_length) > limit ||
     row.byte_length !== row.actual
   )
-    throw notFound();
+    return null;
   const blob = storage.getBlob(workspaceId, hash);
-  if (!blob || blob.byteLength !== row.byte_length || sha(blob) !== hash) throw notFound();
+  if (!blob || blob.byteLength !== row.byte_length || sha(blob) !== hash) return null;
+  return blob;
+}
+function boundedBlob(
+  storage: StorageContext,
+  workspaceId: string,
+  hash: string,
+  limit: number,
+): Uint8Array {
+  const blob = readBoundedRelayBlob(storage, workspaceId, hash, limit);
+  if (!blob) throw notFound();
   return blob;
 }
 /** Owner approval and revocation both invalidate existing launch revisions. */
@@ -439,6 +449,55 @@ export function authorizeLinkAppCollection(
 ) {
   return storage.readTx(() => approved(storage, input).result);
 }
+export interface ScannedCollectionMarkdownFile {
+  readonly path: string;
+  readonly blobSha256: string;
+  readonly contentKind: string;
+  readonly byteLength: number | null;
+  readonly actualLength: number | null;
+}
+
+/** Bounded SQLite prefix scan of direct child Markdown files in one Collection folder. */
+export function scanCollectionMarkdownFiles(
+  storage: StorageContext,
+  input: {
+    readonly workspaceId: string;
+    readonly versionId: string;
+    readonly collectionPath: string;
+    readonly afterPath?: string;
+    readonly limit: number;
+    readonly maxPathBytes?: number;
+  },
+): { readonly rows: readonly ScannedCollectionMarkdownFile[]; readonly hasMore: boolean } {
+  const prefix = `${input.collectionPath}/`;
+  const maxPathBytes = input.maxPathBytes ?? APP_COLLECTION_CURSOR_BYTES;
+  const rows = storage.db
+    .prepare(`SELECT file.path,file.blob_sha256,file.content_kind,blob.byte_length,length(blob.content) AS actual
+      FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs blob ON blob.workspace_id=file.workspace_id AND blob.sha256=file.blob_sha256
+      WHERE file.workspace_id=? AND file.version_id=? AND file.path>? AND file.path>=? AND file.path<?
+      AND length(CAST(file.path AS BLOB))<=? AND instr(substr(file.path,length(?)+1),'/')=0 AND file.path LIKE '%.md' ORDER BY file.path LIMIT ?`)
+    .all(
+      input.workspaceId,
+      input.versionId,
+      input.afterPath ?? "",
+      prefix,
+      `${input.collectionPath}0`,
+      maxPathBytes,
+      prefix,
+      input.limit + 1,
+    );
+  return {
+    rows: rows.slice(0, input.limit).map((row) => ({
+      path: String(row.path),
+      blobSha256: String(row.blob_sha256),
+      contentKind: String(row.content_kind),
+      byteLength: row.byte_length === null ? null : Number(row.byte_length),
+      actualLength: row.actual === null ? null : Number(row.actual),
+    })),
+    hasMore: rows.length > input.limit,
+  };
+}
+
 /** Reads the current workspace projection, so owner edits and deletions take effect. */
 export function readAppCollection(
   storage: StorageContext,
@@ -447,46 +506,39 @@ export function readAppCollection(
   if (!isAppCollectionPageRequest(input.limit, input.afterPath))
     throw badRequest("Invalid collection page.");
   return storage.readTx(() => {
-    const authority = approved(storage, input),
-      prefix = `${authority.capability.collectionPath}/`;
+    const authority = approved(storage, input);
     if (!authority.capability.readFields.length) throw notFound();
-    const rows = storage.db
-      .prepare(`SELECT file.path,file.blob_sha256,file.content_kind,blob.byte_length,length(blob.content) AS actual
-      FROM sync_relay_current_files file LEFT JOIN sync_relay_blobs blob ON blob.workspace_id=file.workspace_id AND blob.sha256=file.blob_sha256
-      WHERE file.workspace_id=? AND file.version_id=? AND file.path>? AND file.path>=? AND file.path<?
-      AND length(CAST(file.path AS BLOB))<=${APP_COLLECTION_CURSOR_BYTES} AND instr(substr(file.path,length(?)+1),'/')=0 AND file.path LIKE '%.md' ORDER BY file.path LIMIT ?`)
-      .all(
-        authority.workspaceId,
-        authority.candidate.versionId,
-        input.afterPath ?? "",
-        prefix,
-        `${authority.capability.collectionPath}0`,
-        prefix,
-        input.limit + 1,
-      );
+    const scanned = scanCollectionMarkdownFiles(storage, {
+      workspaceId: authority.workspaceId,
+      versionId: authority.candidate.versionId,
+      collectionPath: authority.capability.collectionPath,
+      afterPath: input.afterPath,
+      limit: input.limit,
+    });
     function* projectedRows() {
-      for (const row of rows.slice(0, input.limit)) {
-        if (row.byte_length === null || row.byte_length !== row.actual) throw notFound();
-        const path = String(row.path);
-        if (
-          row.content_kind !== "text" ||
-          Number(row.byte_length) > APP_COLLECTION_MAX_RECORD_BYTES
-        ) {
-          yield { path, record: null };
+      for (const row of scanned.rows) {
+        if (row.byteLength === null || row.byteLength !== row.actualLength) throw notFound();
+        if (row.contentKind !== "text" || row.byteLength > APP_COLLECTION_MAX_RECORD_BYTES) {
+          yield { path: row.path, record: null };
           continue;
         }
         const blob = boundedBlob(
           storage,
           authority.workspaceId,
-          String(row.blob_sha256),
+          row.blobSha256,
           APP_COLLECTION_MAX_RECORD_BYTES,
         );
         yield {
-          path,
-          record: projectAppCollectionRecord(path, blob, authority.capability, authority.schema),
+          path: row.path,
+          record: projectAppCollectionRecord(
+            row.path,
+            blob,
+            authority.capability,
+            authority.schema,
+          ),
         };
       }
     }
-    return pageAppCollectionRecords(projectedRows(), rows.length > input.limit);
+    return pageAppCollectionRecords(projectedRows(), scanned.hasMore);
   });
 }

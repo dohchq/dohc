@@ -1,6 +1,8 @@
 import type { ServerProblemKind } from "@dohc/interface-words/account";
+import { collectionWords } from "@dohc/interface-words/collections";
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { documentWords } from "@dohc/interface-words/documents";
+import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import {
   Stack,
   useIsFocused,
@@ -25,10 +27,19 @@ import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { HeaderButton } from "../AndroidHeader";
 import { useShownWorkspaces } from "../chats/Workspaces";
+import { PropertyEditorSheet } from "../collections/DocumentCollectionScreens";
 import { copyText, useCopiedMark } from "../copy";
 import { useFileLifecycle } from "../home/FileNameSheet";
 import { pageTitle } from "../home/homeModel";
-import { canWriteFiles, isLifecycleManagedPath } from "../server/fileWrites";
+import { shownProblem } from "../server/client";
+import {
+  canWriteFiles,
+  isLifecycleManagedPath,
+  newFileRequestId,
+  parentFolder,
+} from "../server/fileWrites";
+import type { RecordValue } from "../server/phoneCollections";
+import { documentCollectionWrites } from "../server/phoneDocumentCollections";
 import { writesIn } from "../server/phoneWrites";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
@@ -52,10 +63,29 @@ import {
 } from "./pageParts";
 
 type PageParams = { path?: string; workspace?: string; t0?: string };
-const pageScript = (path: string, markdown: string, live: boolean) =>
+const inferPropertyField = (key: string, value: RecordValue): FieldDefinition => {
+  if (typeof value === "boolean") return { name: key, type: "checkbox" };
+  if (typeof value === "number") return { name: key, type: "number" };
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value))
+    return { name: key, type: "date" };
+  if (typeof value === "string" && /^https?:\/\//i.test(value)) return { name: key, type: "url" };
+  return { name: key, type: "text" };
+};
+const pageScript = (
+  path: string,
+  markdown: string,
+  live: boolean,
+  propertyFields: readonly FieldDefinition[],
+  propertiesEditable: boolean,
+  relationLabels: Readonly<Record<string, string>>,
+) =>
   `window.__dohcPage = ${JSON.stringify({
     title: pageTitle(path),
     properties: [],
+    propertyFields,
+    propertiesEditable,
+    relationLabels,
+    emptyPropertyLabel: collectionWords.emptyProperty,
     markdown,
     large: false,
     editable: false,
@@ -110,7 +140,45 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
   const name = path.split("/").pop() ?? path;
   const view = useMemo(() => views.page(path), [path]);
   const { state, retry } = useView(view);
+  const { state: docCollectionsState } = useView(views.documentCollections);
   const { current: currentWorkspace } = useShownWorkspaces();
+  const folder = parentFolder(path);
+  const docCollection = useMemo(
+    () => (folder ? (docCollectionsState.value?.find((c) => c.path === folder) ?? null) : null),
+    [docCollectionsState.value, folder],
+  );
+  const insideDocCollection = useMemo(
+    () =>
+      Boolean(
+        folder &&
+        docCollectionsState.value?.some(
+          (c) => folder === c.path || folder.startsWith(`${c.path}/`),
+        ),
+      ),
+    [docCollectionsState.value, folder],
+  );
+  const propertyFields = useMemo(() => docCollection?.fields ?? [], [docCollection]);
+  const [relationLabels, setRelationLabels] = useState<Readonly<Record<string, string>>>({});
+  const [editingProp, setEditingProp] = useState<{
+    readonly key: string;
+    readonly field: FieldDefinition;
+    readonly value: RecordValue;
+  } | null>(null);
+  const [propSaving, setPropSaving] = useState(false);
+  const [propError, setPropError] = useState<string | null>(null);
+  const pendingPropReq = useRef<string | null>(null);
+  const fallbackPropReq = useRef<{
+    readonly key: string;
+    readonly valueJson: string;
+    readonly id: string;
+  } | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
@@ -201,6 +269,92 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     !deleted &&
     objectId !== null &&
     !mutating;
+  const canRenameFile = canEditFiles && !insideDocCollection;
+  const canWriteProps = canWriteFiles(data, currentWorkspace) && !deleted && !mutating;
+  const liveProps =
+    canWriteProps && live !== null && liveState.shown && liveState.facts?.status === "live";
+  const fallbackProps =
+    canWriteProps &&
+    objectId !== null &&
+    liveState.phase === "refused" &&
+    liveState.reason === "live-document-without-lineage";
+  const propertiesEditable = liveProps || fallbackProps;
+  useEffect(() => {
+    if (!painted) return;
+    web.current?.injectJavaScript(
+      `window.__dohcSetPropertiesEditable?.(${JSON.stringify(propertiesEditable)}); true;`,
+    );
+  }, [painted, propertiesEditable]);
+  useEffect(() => {
+    if (!painted) return;
+    web.current?.injectJavaScript(
+      `window.__dohcSetPropertyContext?.(${JSON.stringify({ fields: propertyFields, relationLabels })}); true;`,
+    );
+  }, [painted, propertyFields, relationLabels]);
+  useEffect(() => {
+    if (!liveProps && pendingPropReq.current !== null) {
+      pendingPropReq.current = null;
+      setPropSaving(false);
+      setPropError(collectionWords.editPropertyFailed);
+    }
+  }, [liveProps]);
+  const saveProperty = async (
+    nextValue: RecordValue,
+    nextLabels?: Readonly<Record<string, string>>,
+  ) => {
+    if (!editingProp || propSaving) return;
+    if (nextLabels && Object.keys(nextLabels).length > 0)
+      setRelationLabels((cur) => ({ ...cur, ...nextLabels }));
+    if (liveProps) {
+      const reqId = newFileRequestId();
+      pendingPropReq.current = reqId;
+      setPropSaving(true);
+      setPropError(null);
+      web.current?.injectJavaScript(
+        `window.__dohcPatchFrontmatter?.(${JSON.stringify({ key: editingProp.key, value: nextValue, requestId: reqId })}); true;`,
+      );
+      return;
+    }
+    if (!fallbackProps || !data || !objectId) {
+      setPropError(collectionWords.editPropertyFailed);
+      return;
+    }
+    const active = data;
+    const valueJson = JSON.stringify(nextValue);
+    if (
+      fallbackPropReq.current?.key !== editingProp.key ||
+      fallbackPropReq.current.valueJson !== valueJson
+    )
+      fallbackPropReq.current = { key: editingProp.key, valueJson, id: newFileRequestId() };
+    setPropSaving(true);
+    setPropError(null);
+    try {
+      const res = await documentCollectionWrites(
+        signIn.client,
+        active.workspaceId,
+      ).editRecordFields({
+        path,
+        expectedObjectId: objectId,
+        fields: { [editingProp.key]: nextValue },
+        requestId: fallbackPropReq.current.id,
+      });
+      if (!mountedRef.current || !signIn.isCurrent() || !active.isOpen()) return;
+      if (!res.ok) {
+        setPropError(res.reason);
+        return;
+      }
+      fallbackPropReq.current = null;
+      setEditingProp(null);
+      active.invalidate(views.page(path), true);
+      active.invalidate(views.files);
+    } catch (cause) {
+      if (!mountedRef.current || !signIn.isCurrent() || !active.isOpen()) return;
+      const prob = shownProblem(cause);
+      setPropError(prob ? problemText(prob) : collectionWords.editPropertyFailed);
+    } finally {
+      if (mountedRef.current) setPropSaving(false);
+    }
+  };
   const closeSocketBeforeMutation = async () => {
     setMutating(true);
     await host.gone();
@@ -273,6 +427,45 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     if (data.kind === "unsupportedFormat") setNeedsNewer(true);
     if (current && data.kind === "unwritten")
       setUnwritten({ mount: from, text: unwrittenText("why" in data ? data.why : null) });
+    if (
+      current &&
+      data.kind === "propertyTap" &&
+      propertiesEditable &&
+      "key" in data &&
+      typeof data.key === "string"
+    ) {
+      const val = ("value" in data ? data.value : null) as RecordValue;
+      const defined = propertyFields.find((f) => f.name === data.key);
+      if (
+        defined
+          ? Array.isArray(val) &&
+            defined.type !== "multi-select" &&
+            !(defined.type === "relation" && defined.many)
+          : val !== null && typeof val === "object"
+      )
+        return;
+      const field = defined ?? inferPropertyField(data.key, val);
+      fallbackPropReq.current = null;
+      setPropError(null);
+      setPropSaving(false);
+      setEditingProp({ key: data.key, field, value: val });
+    }
+    if (
+      current &&
+      (data.kind === "propertySaved" || data.kind === "propertyError") &&
+      "requestId" in data &&
+      data.requestId === pendingPropReq.current
+    ) {
+      pendingPropReq.current = null;
+      setPropSaving(false);
+      if (data.kind === "propertySaved") setEditingProp(null);
+      else
+        setPropError(
+          "reason" in data && data.reason === "refused"
+            ? collectionWords.propertyRefused
+            : collectionWords.editPropertyFailed,
+        );
+    }
     // The answer to the one Copy as Markdown waiting for it; the page can't copy unasked.
     if (data.kind === "markdown" || data.kind === "markdownUnavailable") {
       const done = copying.current;
@@ -293,7 +486,14 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     given.current = { mount, markdown, objectId: displayedReadObjectId };
     web.current?.injectJavaScript(
       sent === null
-        ? pageScript(path, markdown, writesIn(data))
+        ? pageScript(
+            path,
+            markdown,
+            writesIn(data),
+            propertyFields,
+            propertiesEditable,
+            relationLabels,
+          )
         : `window.__dohcReplaceRead?.(${JSON.stringify(markdown)}); true;`,
     );
   }, [started, mount, markdown, painted, live, path, host, early]);
@@ -367,7 +567,17 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
       mount,
       markdown,
       objectId: displayedReadObjectId,
-      script: markdown === null ? undefined : pageScript(path, markdown, writesIn(data)),
+      script:
+        markdown === null
+          ? undefined
+          : pageScript(
+              path,
+              markdown,
+              writesIn(data),
+              propertyFields,
+              propertiesEditable,
+              relationLabels,
+            ),
     });
   useEffect(() => {
     if (!webShown) void host.gone();
@@ -443,7 +653,8 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
                       onPress={() =>
                         void documentActions({
                           copyMarkdown: () => copyMarkdown(),
-                          ...(canEditFiles ? { rename: startRename, remove: startDelete } : {}),
+                          ...(canRenameFile ? { rename: startRename } : {}),
+                          ...(canEditFiles ? { remove: startDelete } : {}),
                         })
                       }
                     />
@@ -466,7 +677,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
             <Stack.Toolbar.MenuAction icon="doc.on.doc" onPress={() => copyMarkdown()}>
               {documentWords.copyAsMarkdown}
             </Stack.Toolbar.MenuAction>
-            {canEditFiles ? (
+            {canRenameFile ? (
               <Stack.Toolbar.MenuAction icon="pencil" onPress={startRename}>
                 {documentWords.rename}
               </Stack.Toolbar.MenuAction>
@@ -548,6 +759,24 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
         </Pressable>
       ) : null}
       {lifecycle.sheet}
+      <PropertyEditorSheet
+        open={editingProp !== null}
+        field={editingProp?.field ?? null}
+        value={editingProp?.value ?? null}
+        saving={propSaving}
+        allowDismissWhileSaving={liveProps}
+        error={propError}
+        relationLabels={relationLabels}
+        onClose={() => {
+          if (!propSaving || liveProps) {
+            pendingPropReq.current = null;
+            setPropSaving(false);
+            setEditingProp(null);
+            setPropError(null);
+          }
+        }}
+        onSave={(val, labels) => void saveProperty(val, labels)}
+      />
     </View>
   );
 }

@@ -8,9 +8,22 @@ import {
   type LiveFrameBegin,
 } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { LIVE_MARKDOWN_MAX_BYTES } from "@dohc/live-session-contract/limits";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
+import { frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import {
+  createLiveMarkdownJournalValidator,
+  WORKER_LIVE_VALIDATION_POLICY,
+} from "@dohc/ydoc-projection/live-journal-validation";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import {
+  formatProperty,
+  isEditablePropertyValue,
+  isHiddenPropertyKey,
+} from "../../editor/document";
+import { applyCheckedFrontmatterPatch } from "../../editor/live";
 import { createLiveAdapter } from "../../editor/liveAdapter";
 import { fromBase64, outgoing, toBase64, type FromPage, type ToPage } from "./liveBridge";
 import { liveLimits } from "./liveFixtures";
@@ -337,5 +350,101 @@ describe("the page's live connection", () => {
     await settled();
     expect(t.provider().state().status).toBe("disconnected");
     expect(t.sentOn(2).at(-1)).toMatchObject({ type: "close" });
+  });
+
+  it("submits live patchFrontmatter updates passing live journal validation and fires observeDeep on remote updates", async () => {
+    const t = page();
+    const app = t.connect();
+    const base = markdownToYDoc("---\nStatus: Todo\n---\nbody\n");
+    await app.sync(base);
+
+    const observed: Array<Record<string, unknown>> = [];
+    const frontmatter = t.provider().doc.getMap("frontmatter");
+    frontmatter.observeDeep(() => observed.push(frontmatterMapValues(frontmatter)));
+
+    const checkpoint = Y.encodeStateAsUpdate(t.provider().doc);
+    patchFrontmatter(t.provider().doc, new Map<string, unknown>([["Status", "Done"]]));
+    await vi.waitFor(() => expect(app.submissions.length).toBe(1));
+    expect(observed.at(-1)).toMatchObject({ Status: "Done" });
+
+    const validate = createLiveMarkdownJournalValidator(WORKER_LIVE_VALIDATION_POLICY);
+    const verdict = validate({
+      document: {
+        workspaceId: binding.workspaceId,
+        mainVersionId: binding.mainVersionId,
+        objectId: binding.objectId,
+        lineageClaimId: binding.lineageClaimId,
+      },
+      checkpoint,
+      suffix: [],
+      candidate: app.submissions[0]!.bytes,
+      currentPath: binding.currentPath,
+    });
+    expect(verdict.kind).toBe("accepted");
+  });
+
+  it("formats structured and bigint frontmatter without throwing and keeps undeclared lists read-only", () => {
+    const doc = markdownToYDoc(
+      "---\ncontacts:\n  - name: Ada\nbig:\n  id: 9007199254740993\ntags:\n  - travel\n  - family\n---\nbody\n",
+    );
+    const values = frontmatterMapValues(doc.getMap("frontmatter"));
+
+    expect(formatProperty(values.contacts, undefined, {}, "Empty")).toContain("Ada");
+    expect(formatProperty(values.big, undefined, {}, "Empty")).toContain("9007199254740993");
+    expect(formatProperty(values.tags, undefined, {}, "Empty")).toBe("travel, family");
+
+    expect(isEditablePropertyValue(values.contacts, undefined)).toBe(false);
+    expect(isEditablePropertyValue(values.big, undefined)).toBe(false);
+    expect(isEditablePropertyValue(9007199254740993n, { name: "Count", type: "number" })).toBe(
+      false,
+    );
+    expect(isEditablePropertyValue(values.tags, undefined)).toBe(false);
+    expect(isEditablePropertyValue(values.tags, { name: "tags", type: "text" })).toBe(false);
+    expect(
+      isEditablePropertyValue(["rec_1"], {
+        name: "Project",
+        type: "relation",
+        collection: "Projects",
+        many: false,
+      }),
+    ).toBe(false);
+    expect(
+      isEditablePropertyValue(values.tags, {
+        name: "tags",
+        type: "multi-select",
+        options: ["travel", "family"],
+      }),
+    ).toBe(true);
+    expect(
+      isEditablePropertyValue(["rec_1"], {
+        name: "Projects",
+        type: "relation",
+        collection: "Projects",
+        many: true,
+      }),
+    ).toBe(true);
+
+    expect(isHiddenPropertyKey("Title", { name: "Title", type: "text" })).toBe(false);
+    expect(isHiddenPropertyKey("Icon", { name: "Icon", type: "text" })).toBe(false);
+    expect(isHiddenPropertyKey("id", undefined)).toBe(true);
+    expect(isHiddenPropertyKey("title", undefined)).toBe(true);
+    expect(isHiddenPropertyKey("icon", undefined)).toBe(true);
+
+    const declaredDoc = markdownToYDoc("---\nTitle: Old\n---\nbody\n");
+    expect(
+      applyCheckedFrontmatterPatch(declaredDoc, "Title", "New", { name: "Title", type: "text" }),
+    ).toEqual({ ok: true, changed: true });
+    expect(frontmatterMapValues(declaredDoc.getMap("frontmatter")).Title).toBe("New");
+
+    const nearLimit = `---\nName: a\n---\n\n${"x".repeat(LIVE_MARKDOWN_MAX_BYTES - 45)}\n`;
+    const bigDoc = markdownToYDoc(nearLimit);
+    const before = yDocToMarkdown(bigDoc);
+    expect(
+      applyCheckedFrontmatterPatch(bigDoc, "Name", "y".repeat(80), { name: "Name", type: "text" }),
+    ).toEqual({ ok: false, reason: "refused" });
+    expect(yDocToMarkdown(bigDoc)).toBe(before);
+    expect(
+      applyCheckedFrontmatterPatch(bigDoc, "Name", "b", { name: "Name", type: "text" }),
+    ).toEqual({ ok: true, changed: true });
   });
 });

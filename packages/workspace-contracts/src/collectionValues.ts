@@ -1,5 +1,6 @@
-import { CORE_SCHEMA, load, realMapTag } from "js-yaml";
+import { CORE_SCHEMA, dump, load, realMapTag } from "js-yaml";
 import {
+  chosenOptionColor,
   RECORD_ID_FRONTMATTER_KEY,
   type CollectionFieldType,
   type CollectionSchema,
@@ -734,4 +735,43 @@ export function parseCollectionRecordFields(markdown: string): Record<string, un
   } catch {
     return null;
   }
+}
+
+function serializeFieldEntry(field: FieldDefinition): Record<string, unknown> {
+  if (field.type === "select" || field.type === "multi-select") {
+    const kept = field.options.flatMap((option) => {
+      const color = chosenOptionColor(field.colors, option);
+      return color ? [[option, color] as const] : [];
+    });
+    return {
+      type: field.type,
+      options: field.options,
+      ...(kept.length > 0 ? { colors: Object.fromEntries(kept) } : {}),
+    };
+  }
+  if (field.type === "relation")
+    return { type: field.type, collection: field.collection, many: field.many };
+  return { type: field.type };
+}
+
+function serializeViewEntry(view: ViewDefinition): Record<string, unknown> {
+  const entry: Record<string, unknown> = { name: view.name, kind: view.kind };
+  if (view.groupBy !== null) entry.groupBy = view.groupBy;
+  if (view.sort.length > 0)
+    entry.sort = view.sort.map((clause) => ({ field: clause.field, direction: clause.direction }));
+  if (view.visibleFields !== null) entry.visibleFields = view.visibleFields;
+  if (view.dateField !== null) entry.dateField = view.dateField;
+  return entry;
+}
+
+/** Turns a CollectionSchema into the exact collection.yaml shape parseCollectionSchema reads. */
+export function serializeCollectionSchema(schema: CollectionSchema): string {
+  const document: Record<string, unknown> = { version: 1 };
+  if (schema.name !== null) document.name = schema.name;
+  if (schema.description !== null) document.description = schema.description;
+  document.fields = Object.fromEntries(
+    schema.fields.map((field) => [field.name, serializeFieldEntry(field)]),
+  );
+  if (schema.views.length > 0) document.views = schema.views.map(serializeViewEntry);
+  return dump(document, { lineWidth: -1, sortKeys: false });
 }

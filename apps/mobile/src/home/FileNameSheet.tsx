@@ -3,7 +3,7 @@ import { documentWords } from "@dohc/interface-words/documents";
 import { noticesWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { useIsFocused } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -370,6 +370,81 @@ export function useFileLifecycle(workspaceName: string) {
   return { sheet, openCreate, openRename, confirmDelete, openActions, deletingPath };
 }
 
+export function SheetModal(props: {
+  readonly open: boolean;
+  readonly title: string;
+  readonly saving: boolean;
+  readonly allowDismissWhileSaving?: boolean;
+  readonly savingLabel: string;
+  readonly actionLabel: string;
+  readonly onClose: () => void;
+  readonly onAction: () => void;
+  readonly children: ReactNode;
+}) {
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  const canDismiss = !props.saving || props.allowDismissWhileSaving === true;
+  const close = () => {
+    if (canDismiss) props.onClose();
+  };
+  useBackCloses(props.open, close);
+  return (
+    <Modal
+      visible={props.open}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={close}
+    >
+      {props.open ? (
+        <View
+          style={[
+            styles.sheet,
+            {
+              backgroundColor: theme.bg,
+              paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
+              paddingBottom: insets.bottom,
+            },
+          ]}
+        >
+          <View style={[styles.header, { borderColor: theme.line }]}>
+            <Pressable
+              onPress={close}
+              disabled={!canDismiss}
+              android_ripple={ripple(theme, true)}
+              style={[styles.btn, styles.side]}
+              accessibilityRole="button"
+            >
+              <Text style={[styles.btnText, { color: !canDismiss ? theme.subtle : theme.ink }]}>
+                {confirmWords.cancel}
+              </Text>
+            </Pressable>
+            <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
+              {props.title}
+            </Text>
+            {props.saving ? (
+              <View style={[styles.btn, styles.side, styles.right]}>
+                <ActivityIndicator accessibilityLabel={props.savingLabel} />
+              </View>
+            ) : (
+              <Pressable
+                onPress={props.onAction}
+                android_ripple={ripple(theme, true)}
+                style={[styles.btn, styles.side, styles.right]}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.btnText, styles.strong, { color: theme.ink }]}>
+                  {props.actionLabel}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+          {props.children}
+        </View>
+      ) : null}
+    </Modal>
+  );
+}
+
 export function FileNameSheet(props: {
   readonly open: boolean;
   readonly mode: "create" | "rename";
@@ -385,7 +460,6 @@ export function FileNameSheet(props: {
 }) {
   const { open, mode, folder, initialName, extension, currentPath, onClose, onSubmit } = props;
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
   const [name, setName] = useState(initialName);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -404,11 +478,6 @@ export function FileNameSheet(props: {
     setError(null);
     requestId.current = null;
   }, [open, initialName, mode, currentPath]);
-
-  const close = () => {
-    if (!saving) onClose();
-  };
-  useBackCloses(open, close);
 
   const submit = async () => {
     if (saving) return;
@@ -436,93 +505,51 @@ export function FileNameSheet(props: {
   const savingLabel = mode === "create" ? documentWords.creating : documentWords.saving;
 
   return (
-    <Modal
-      visible={open}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={close}
+    <SheetModal
+      open={open}
+      title={title}
+      saving={saving}
+      savingLabel={savingLabel}
+      actionLabel={mode === "create" ? documentWords.create : documentWords.save}
+      onClose={onClose}
+      onAction={() => void submit()}
     >
-      {open ? (
-        <View
+      <View style={styles.body}>
+        <TextInput
+          value={name}
+          onChangeText={(next) => {
+            setName(next);
+            setError(null);
+            requestId.current = null;
+          }}
+          placeholder={documentWords.namePlaceholder}
+          placeholderTextColor={theme.subtle}
+          editable={!saving}
+          autoFocus
+          returnKeyType="done"
+          onSubmitEditing={() => void submit()}
+          accessibilityLabel={title}
           style={[
-            styles.sheet,
+            styles.input,
             {
-              backgroundColor: theme.bg,
-              paddingTop: Platform.OS === "ios" ? 8 : insets.top + 8,
-              paddingBottom: insets.bottom,
+              color: theme.ink,
+              backgroundColor: theme.panel,
+              borderColor: error ? theme.danger : theme.line,
             },
           ]}
-        >
-          <View style={[styles.header, { borderColor: theme.line }]}>
-            <Pressable
-              onPress={close}
-              disabled={saving}
-              android_ripple={ripple(theme, true)}
-              style={[styles.btn, styles.side]}
-              accessibilityRole="button"
-            >
-              <Text style={[styles.btnText, { color: saving ? theme.subtle : theme.ink }]}>
-                {confirmWords.cancel}
-              </Text>
-            </Pressable>
-            <Text style={[styles.title, { color: theme.ink }]} numberOfLines={1}>
-              {title}
-            </Text>
-            {saving ? (
-              <View style={[styles.btn, styles.side, styles.right]}>
-                <ActivityIndicator accessibilityLabel={savingLabel} />
-              </View>
-            ) : (
-              <Pressable
-                onPress={() => void submit()}
-                android_ripple={ripple(theme, true)}
-                style={[styles.btn, styles.side, styles.right]}
-                accessibilityRole="button"
-              >
-                <Text style={[styles.btnText, styles.strong, { color: theme.ink }]}>
-                  {mode === "create" ? documentWords.create : documentWords.save}
-                </Text>
-              </Pressable>
-            )}
-          </View>
-          <View style={styles.body}>
-            <TextInput
-              value={name}
-              onChangeText={(next) => {
-                setName(next);
-                setError(null);
-                requestId.current = null;
-              }}
-              placeholder={documentWords.namePlaceholder}
-              placeholderTextColor={theme.subtle}
-              editable={!saving}
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={() => void submit()}
-              accessibilityLabel={title}
-              style={[
-                styles.input,
-                {
-                  color: theme.ink,
-                  backgroundColor: theme.panel,
-                  borderColor: error ? theme.danger : theme.line,
-                },
-              ]}
-            />
-            {saving ? (
-              <Text style={[styles.note, { color: theme.muted }]}>
-                {savingLabel} {documentWords.coldCopyNote}
-              </Text>
-            ) : null}
-            {error ? (
-              <Text style={[styles.note, { color: theme.danger }]} accessibilityRole="alert">
-                {error}
-              </Text>
-            ) : null}
-          </View>
-        </View>
-      ) : null}
-    </Modal>
+        />
+        {saving ? (
+          <Text style={[styles.note, { color: theme.muted }]}>
+            {savingLabel} {documentWords.coldCopyNote}
+          </Text>
+        ) : null}
+        {error ? (
+          <Text style={[styles.note, { color: theme.danger }]} accessibilityRole="alert">
+            {error}
+          </Text>
+        ) : null}
+      </View>
+    </SheetModal>
   );
 }
 

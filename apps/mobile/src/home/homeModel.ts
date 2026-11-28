@@ -84,21 +84,29 @@ export function revealedPages(rows: readonly HomeRow[], passed: Set<string>): st
 export function homeRows(
   files: readonly WorkspaceFile[],
   expanded: ReadonlySet<string>,
-  options?: { readonly showAllOthers?: boolean },
+  options?: {
+    readonly showAllOthers?: boolean;
+    readonly documentCollections?: ReadonlySet<string>;
+  },
 ): { pages: HomeRow[]; sketches: FirstFiles; others: FirstFiles } {
-  // A dataset's folder holds its dataset.json; everything under it belongs to the Collection.
   const owners = new Set(
     files
       .filter((file) => basename(file.path) === "dataset.json")
       .map((file) => dirname(file.path)),
   );
-  const owned = (path: string) =>
-    [...owners].some((owner) => path === owner || path.startsWith(`${owner}/`));
+  const docCollections = options?.documentCollections;
+  const owned = (file: WorkspaceFile) => {
+    if ([...owners].some((owner) => file.path === owner || file.path.startsWith(`${owner}/`)))
+      return true;
+    if (!docCollections?.size || !docCollections.has(dirname(file.path))) return false;
+    const name = basename(file.path);
+    return name === "collection.yaml" || (/\.md$/i.test(name) && !name.startsWith("."));
+  };
   const root: Folder = { path: "", folders: new Map(), pages: [] };
   const sketches: WorkspaceFile[] = [];
   const others: WorkspaceFile[] = [];
   for (const file of files) {
-    if (owned(file.path)) continue;
+    if (owned(file)) continue;
     if (!file.page) {
       (fileKindForPath(file.path).displayKind === "drawing" ? sketches : others).push(file);
       continue;

@@ -99,6 +99,28 @@ describe("Home's rows", () => {
       objectId: "object:trip/route.excalidraw",
     });
   });
+
+  it("excludes only listed Document Collection manifests and direct markdown records, keeping nested pages, sketches, and other files", () => {
+    const withDocs = [
+      ...files,
+      file("tasks/collection.yaml"),
+      file("tasks/first.md"),
+      file("tasks/notes/meeting.md"),
+      file("tasks/plan.excalidraw"),
+      file("tasks/budget.csv"),
+    ];
+    const ownerRows = homeRows(withDocs, new Set(["tasks", "tasks/notes"]), {
+      documentCollections: new Set(["tasks"]),
+    });
+    expect(ownerRows.pages.some((r) => r.path === "tasks/first.md")).toBe(false);
+    expect(ownerRows.pages.some((r) => r.path === "tasks/notes/meeting.md")).toBe(true);
+    expect(ownerRows.sketches.shown.some((r) => r.path === "tasks/plan.excalidraw")).toBe(true);
+    expect(ownerRows.others.shown.some((r) => r.path === "tasks/collection.yaml")).toBe(false);
+    expect(ownerRows.others.shown.some((r) => r.path === "tasks/budget.csv")).toBe(true);
+
+    const unlistedRows = homeRows(withDocs, new Set(["tasks"]));
+    expect(unlistedRows.pages.some((r) => r.path === "tasks/first.md")).toBe(true);
+  });
 });
 
 describe("Home's apps", () => {
