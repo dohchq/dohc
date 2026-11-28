@@ -1509,6 +1509,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       queuePull: () => {},
       retryNow: async () => undefined,
       pushRecorded: async () => undefined,
+      drainRecorded: async () => undefined,
       catchUp: async () => undefined,
       snapshot: () => ({
         syncFailure,

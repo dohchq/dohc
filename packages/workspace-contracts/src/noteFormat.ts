@@ -18,7 +18,7 @@ export type ConvertNotesResult = z.output<typeof ConvertNotesResult>;
 
 const HISTORY_INCOMPLETE = "History incomplete";
 
-export const SKIPPED_NOTE_GROUPS: Readonly<Record<string, string>> = {
+const SKIPPED_NOTE_GROUPS: Readonly<Record<string, string>> = {
   "open-here": "Open on this computer",
   "open-elsewhere": "Open elsewhere",
   held: "Held",
