@@ -433,15 +433,15 @@ export function createPhonePages(options: {
       token: minted.token,
       expiresAtMs,
     });
-    return created === null
-      ? refused("live_host_full")
-      : {
-          ...ready,
-          mode: "named",
-          session: created.discriminator,
-          liveWorkspaceId: `named:${memberScope.grantId}`,
-          expiresAtMs: created.expiresAtMs,
-        };
+    if (created === null)
+      throw new RelayError("server_busy", "Your server is busy. Try again shortly.");
+    return {
+      ...ready,
+      mode: "named",
+      session: created.discriminator,
+      liveWorkspaceId: `named:${memberScope.grantId}`,
+      expiresAtMs: created.expiresAtMs,
+    };
   }
 }
 

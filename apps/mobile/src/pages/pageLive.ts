@@ -32,6 +32,8 @@ export interface PageLiveState {
   readonly unsent: boolean;
   /** The page shows the live document, not the text the app read. */
   readonly shown: boolean;
+  /** A connected socket closed and the web view has not yet reported its post-disconnect state. */
+  readonly confirming?: boolean;
   /** The object identity of the live document opened by `openPage`, once bound. */
   readonly objectId?: string;
 }
@@ -134,13 +136,14 @@ export function createPageLive(options: {
 
   function lose(reason: string) {
     if (state.phase === "ended" || state.phase === "refused") return;
+    const confirming = Boolean(open?.connected);
     void close();
-    set({ phase: "lost", reason });
+    set({ phase: "lost", reason, confirming });
   }
 
   function refuse(reason: string) {
     void close();
-    set({ phase: "refused", reason });
+    set({ phase: "refused", reason, confirming: false });
   }
 
   async function begin() {
@@ -150,7 +153,7 @@ export function createPageLive(options: {
     // The last connection's reports say nothing of this one.
     retired = stream ?? retired;
     stream = null;
-    set({ phase: "opening", reason: null, facts: null });
+    set({ phase: "opening", reason: null, facts: null, confirming: false });
     const current = () => open === held;
     let delay = FIRST_RETRY_MS;
     try {
@@ -260,10 +263,12 @@ export function createPageLive(options: {
         return;
       case "state": {
         const facts = message.facts;
+        const settled = facts.status === "disconnected" || facts.status === "quarantined";
         set({
           facts,
           unsent: facts.unsent,
           shown: state.shown || facts.status === "live",
+          ...(settled ? { confirming: false } : {}),
           ...(facts.status === "live" ? { objectId: held.objectId } : {}),
         });
         if (facts.status !== "quarantined") return;
@@ -290,7 +295,7 @@ export function createPageLive(options: {
     end() {
       const closed = close();
       stream = retired = null;
-      if (state.phase !== "ended") set({ phase: "ended" });
+      if (state.phase !== "ended") set({ phase: "ended", confirming: false });
       return closed;
     },
   };
@@ -337,10 +342,7 @@ export const holdsUnsent = (state: PageLiveState) => state.phase !== "ended" && 
  * socket is open, or after a close until the web view confirms whether any edits remain unsent.
  */
 export const holdsMount = (state: PageLiveState) =>
-  state.phase !== "ended" &&
-  (state.unsent ||
-    state.phase === "open" ||
-    (state.phase === "lost" && state.facts?.status === "live"));
+  state.phase !== "ended" && (state.unsent || state.phase === "open" || Boolean(state.confirming));
 
 /**
  * Whether the web view must stay: it shows the live document, or may yet. Text the app reads later never replaces it.

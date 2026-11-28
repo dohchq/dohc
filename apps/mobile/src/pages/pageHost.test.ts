@@ -184,12 +184,16 @@ describe("pageMountKey + holdsMount", () => {
     t.latest().open();
     const live = t.host.state().live!;
     const fromPage = pageSide(live)(1);
-    fromPage({ type: "state", facts: facts("live") });
     expect(holdsMount(live.state())).toBe(true);
 
-    // Feed replace reopens the store (instance 1 -> 2) and socket closes BEFORE the web view's queued unsent report arrives.
+    // Feed replace reopens the store (instance 1 -> 2) and socket closes BEFORE even the first `live` report arrives.
     t.latest().close();
-    expect(live.state()).toMatchObject({ phase: "lost", unsent: false });
+    expect(live.state()).toMatchObject({
+      phase: "lost",
+      facts: null,
+      unsent: false,
+      confirming: true,
+    });
     expect(holdsMount(live.state())).toBe(true);
     const duringRace = pageMountKey(
       initial.held,
@@ -197,6 +201,10 @@ describe("pageMountKey + holdsMount", () => {
       holdsMount(live.state()),
     );
     expect(duringRace.key).toBe("1:notes/plan.md");
+
+    // Queued `live` report arrives while still awaiting disconnect -> stays mounted.
+    fromPage({ type: "state", facts: facts("live") });
+    expect(holdsMount(live.state())).toBe(true);
 
     // Queued web view disconnect arrives with unsent: true -> stays mounted to preserve the draft.
     fromPage({
@@ -217,7 +225,7 @@ describe("pageMountKey + holdsMount", () => {
       ).key,
     ).toBe("1:notes/plan.md");
 
-    // Once the web view confirms no unsent edits remain (or teardown ends the live session), the mount advances.
+    // Once the web view confirms no unsent edits remain, the mount advances.
     fromPage({
       type: "state",
       facts: {

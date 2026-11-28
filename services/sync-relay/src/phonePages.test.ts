@@ -817,3 +817,12 @@ it("invalidates pending phone member sessions on stopPhoneWorkspace, stopSession
     }),
   ).toBeNull();
 });
+
+it("answers 503 server_busy when the phone member session table is full, keeping Try again", async () => {
+  const f = await joinedPhone();
+  f.ready();
+  f.memberSessions.create = () => null;
+  const res = await f.open(binding.currentPath);
+  expect(res.status).toBe(503);
+  expect(res.body).toMatchObject({ ok: false, code: "server_busy" });
+});
