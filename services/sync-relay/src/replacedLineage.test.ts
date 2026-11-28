@@ -250,9 +250,18 @@ const enrolment = (note: Note) =>
   note.raw.prepare("SELECT state,retired FROM sync_relay_service_host_enrollments").all();
 
 function hostRetires(note: Note) {
+  completeRetirement(note, note.document);
+  note.deployment.storage.releaseServiceHostEnrollment({
+    workspaceId: "workspace",
+    objectId: note.document.objectId,
+    nowMs: 31,
+  });
+}
+
+function completeRetirement(note: Note, document: LiveDocumentKey) {
   const open = readServiceActivationRetirement(
     note.deployment.storage as unknown as StorageContext,
-    note.document,
+    document,
   )!;
   expect(
     note.deployment.storage
@@ -273,11 +282,6 @@ function hostRetires(note: Note) {
         guard() {},
       }),
   ).toEqual({ status: "retired", replayed: false });
-  note.deployment.storage.releaseServiceHostEnrollment({
-    workspaceId: "workspace",
-    objectId: note.document.objectId,
-    nowMs: 31,
-  });
 }
 
 it("accepting a replacement closes an open session's claim, so the next save on it is refused as stale", () => {
@@ -364,6 +368,54 @@ it("a successor registers after its predecessor's resolve, while a pause is left
       replaces_lineage_claim_id: note.document.lineageClaimId,
     },
   ]);
+});
+
+it("a second successor registers while a pause is left on the claim the first replaced", async () => {
+  const note = await sharedNote();
+  const validate = validation();
+  expect(await activate(note, validate)).toMatchObject({ replayed: false });
+  pauseLiveRoom(note.deployment.storage as unknown as StorageContext, {
+    document: note.document,
+    cause: "refused",
+    refusal: "stale-binding",
+    named: [],
+    copy: new Uint8Array([1]),
+    pausedAtMs: 4,
+  });
+  const first = successor(note.document, note.path, "Merged on the owner's desktop\n", 3);
+  const firstBase = resolveTypedNote(note, first).baseRelaySeq;
+  hostRetires(note);
+  const firstCapture = captureOf(note, first, {
+    baseOriginId: "owner-desktop",
+    baseOriginSeq: 0,
+    baseRelaySeq: firstBase,
+  });
+  expect(await activate(note, validate, firstCapture)).toMatchObject({ document: first.document });
+  const next = successor(first.document, note.path, "Merged again on the owner's desktop\n", 4);
+  const { baseRelaySeq } = resolveTypedNote(note, next, {
+    originSeq: 1,
+    predecessor: first.document,
+    current: first.markdown,
+  });
+  completeRetirement(note, first.document);
+
+  const capture = {
+    ...captureOf(note, next, { baseOriginId: "owner-desktop", baseOriginSeq: 1, baseRelaySeq }),
+    activationId: `ordinary-activation-${"c".repeat(64)}`,
+  };
+  expect(await activate(note, validate, capture)).toEqual({
+    document: next.document,
+    replayed: false,
+    completed: false,
+  });
+  const states = Object.fromEntries(
+    liveDocumentRows(note).map((row) => [row.lineage_claim_id, row.lineage_state]),
+  );
+  expect(states).toEqual({
+    [note.document.lineageClaimId]: "retired",
+    [first.document.lineageClaimId]: "retired",
+    [next.document.lineageClaimId]: "current",
+  });
 });
 
 it("a successor takes over a note an Edit share keeps live, once its predecessor retired", async () => {
