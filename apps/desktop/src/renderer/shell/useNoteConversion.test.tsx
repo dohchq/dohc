@@ -2,7 +2,11 @@
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import type { ConvertNotesResult } from "@dohc/workspace-contracts/note-format";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DohcDesktopBridge, NoteConversionProgress } from "../../ipc/bridgeContract";
+import type {
+  DohcDesktopBridge,
+  NoteConversionProgress,
+  NoteConversionRetried,
+} from "../../ipc/bridgeContract";
 import { WorkspaceSessionProvider } from "../workspace/workspaceSession";
 import { noteConversionNotice, useNoteConversion, type NoteConversion } from "./useNoteConversion";
 
@@ -17,6 +21,7 @@ const clean: ConvertNotesResult = {
 
 type CloudSessionListener = Parameters<DohcDesktopBridge["onCloudSessionChanged"]>[0];
 let progress: ((event: NoteConversionProgress) => void) | null = null;
+let retried: ((event: NoteConversionRetried) => void) | null = null;
 let accounts: CloudSessionListener[] = [];
 function install(
   convertNotes: DohcDesktopBridge["convertNotes"],
@@ -37,6 +42,12 @@ function install(
       progress = listener;
       return () => {
         progress = null;
+      };
+    },
+    onNoteConversionRetried: (listener: (event: NoteConversionRetried) => void) => {
+      retried = listener;
+      return () => {
+        retried = null;
       };
     },
   } as unknown as DohcDesktopBridge;
@@ -92,6 +103,7 @@ function mount(workspaceId = "ws-a", ready = true) {
 afterEach(() => {
   cleanup();
   progress = null;
+  retried = null;
   accounts = [];
   delete window.dohcDesktop;
 });
@@ -377,6 +389,69 @@ describe("converting notes from this window", () => {
     await act(async () => shell.conversion().start());
     expect(shell.conversion().state).toEqual({ status: "done", converted: 0, left: 2 });
     expect(shell.success).not.toHaveBeenCalled();
+  });
+
+  describe("once a note it left as open here closes", () => {
+    const none = { ...clean, converted: 0, unchanged: 0 };
+    const left = {
+      ...clean,
+      skipped: [
+        { path: "Day 1.md", reason: "open-here" },
+        { path: "Day 2.md", reason: "open-here" },
+      ],
+    };
+
+    async function afterRun() {
+      install(vi.fn<DohcDesktopBridge["convertNotes"]>().mockResolvedValueOnce(left));
+      const shell = mount();
+      await act(async () => shell.conversion().start());
+      shell.report.mockClear();
+      return shell;
+    }
+
+    it("takes a converted note off the row, and clears the row with a toast once none are left", async () => {
+      const shell = await afterRun();
+      act(() =>
+        retried?.({ workspaceId: "ws-a", path: "Day 1.md", result: { ...none, converted: 1 } }),
+      );
+      expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          title: "1 note was not converted",
+          rows: ["Open on this computer: Day 2.md"],
+          action: expect.objectContaining({ label: "Convert remaining" }),
+        }),
+      );
+      act(() =>
+        retried?.({ workspaceId: "ws-a", path: "Day 2.md", result: { ...none, converted: 1 } }),
+      );
+      expect(shell.clear).toHaveBeenLastCalledWith("note-conversion");
+      expect(shell.success).toHaveBeenCalledExactlyOnceWith(
+        "Converted 1,982 notes",
+        undefined,
+        "note-conversion",
+      );
+    });
+
+    it("moves a note whose retry failed into Could not be read, still offering Convert remaining", async () => {
+      const shell = await afterRun();
+      const failed = [{ path: "Day 1.md", reason: "engine stopped" }];
+      act(() => retried?.({ workspaceId: "ws-a", path: "Day 1.md", result: { ...none, failed } }));
+      expect(shell.report).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          title: "2 notes were not converted",
+          rows: ["Open on this computer: Day 2.md", "Could not be read: Day 1.md"],
+          action: expect.objectContaining({ label: "Convert remaining" }),
+        }),
+      );
+    });
+
+    it("ignores a note retried in another workspace", async () => {
+      const shell = await afterRun();
+      act(() =>
+        retried?.({ workspaceId: "ws-b", path: "Day 1.md", result: { ...none, converted: 1 } }),
+      );
+      expect(shell.report).not.toHaveBeenCalled();
+    });
   });
 
   it("shows nothing from workspace A's run once the window moves to workspace B", async () => {
