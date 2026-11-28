@@ -232,6 +232,7 @@
     "desktop:move-set-aside-drafts",
     "desktop:move-workspace-path",
     "desktop:note-conversion-progress",
+    "desktop:note-conversion-retried",
     "desktop:notices-changed",
     "desktop:old-window-state-changed",
     "desktop:open-external-url",
