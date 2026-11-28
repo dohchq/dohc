@@ -878,7 +878,7 @@ fn apply_moment_append(
                     }
             }
         };
-        if history_only {
+        if history_only || saved_on_replaced_claim(tx, envelope, payload)? {
             ensure_file_object(tx, &envelope.workspace_id, payload)?;
             insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
             return Ok(MomentApplyResult {
@@ -1913,6 +1913,36 @@ fn holds_earlier_lineage_artifact(
         }
     }
     Ok(false)
+}
+
+fn saved_on_replaced_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    if !is_ydoc_settlement_moment_id(&payload.moment_id)
+        || payload.operation != "write"
+        || payload.path != payload.payload_after_path
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(false);
+    }
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replication_log r \
+         JOIN ydoc_inactive_lineages i ON i.workspace_id=?1 AND i.version_id=?3 AND i.object_id=?4 \
+           AND i.lineage_claim_id=json_extract(r.payload_json,'$.lineageClaimId') \
+         JOIN ydoc_docs d ON d.workspace_id=?1 AND d.version_id=?3 AND d.object_id=?4 \
+           AND d.lineage_claim_status='exact' AND d.lineage_claim_id<>i.lineage_claim_id \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq=(\
+           SELECT MAX(origin_seq) FROM replication_log INDEXED BY replication_ydoc_origin_document \
+           WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+             AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4))",
+        params![envelope.workspace_id, envelope.origin_id, payload.version_id, payload.object_id,
+            envelope.origin_seq],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 fn origin_settled_on_held_claim(
