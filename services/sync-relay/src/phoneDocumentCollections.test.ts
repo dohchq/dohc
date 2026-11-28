@@ -173,7 +173,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       { path: "Tasks/collection.yaml", text: schema },
       {
         path: "Projects/collection.yaml",
-        text: "name: Projects\nfields:\n  Name:\n    type: text\n",
+        text: `name: "${"P".repeat(600)}"\nfields:\n  Name:\n    type: text\n`,
       },
       { path: ".secret/collection.yaml", text: "name: Secret\nfields:\n  Name:\n    type: text\n" },
       { path: ".dohc/collection.yaml", text: "name: Internal\nfields:\n  Name:\n    type: text\n" },
@@ -191,6 +191,11 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
         path: "Tasks/Alpha.md",
         text: `---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\nStatus: Todo\nProject: ${projectRecId}\n---\n${largeBody}\n`,
         objectId: "obj-alpha",
+      },
+      {
+        path: "Tasks/Beta.md",
+        text: `---   \ntitle: "${"LongTitle".repeat(200)}"\nStatus: Done\n---  \nBody\n`,
+        objectId: "obj-beta",
       },
       { path: "Tasks/.hidden.md", text: "---\nStatus: Secret\n---\n" },
     ]);
@@ -218,7 +223,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
               suffix: [{ bytes: updates[0]! }],
             },
           } as never)
-        : { kind: "absent" },
+        : { kind: "none" },
     );
 
     const listResp = await h(postOp("ws", "documentCollections", "ana", {}));
@@ -228,6 +233,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       result: { ok: true; collections: Array<{ path: string; name: string }> };
     };
     expect(listBody.result.collections.map((c) => c.path)).toEqual(["Projects", "Tasks"]);
+    expect(listBody.result.collections[0]?.name.length).toBeLessThanOrEqual(256);
 
     const recResp = await h(
       postOp("ws", "documentCollectionRecords", "ana", { collectionPath: "Tasks" }),
@@ -237,15 +243,17 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       ok: true;
       result: {
         ok: true;
-        records: Array<{ path: string; values: Record<string, unknown> }>;
+        records: Array<{ path: string; title: string; values: Record<string, unknown> }>;
         relationLabels: Record<string, string>;
       };
     };
-    expect(recBody.result.records.map((r) => r.path)).toEqual(["Tasks/Alpha.md"]);
+    expect(recBody.result.records.map((r) => r.path)).toEqual(["Tasks/Alpha.md", "Tasks/Beta.md"]);
     expect(recBody.result.records[0]?.values).toEqual({
       Status: "Done",
       Project: projectRecId,
     });
+    expect(recBody.result.records[1]?.values).toEqual({ Status: "Done" });
+    expect(recBody.result.records[1]?.title.length).toBeLessThanOrEqual(256);
     expect(recBody.result.relationLabels).toEqual({ [projectRecId]: "Launch" });
   });
 

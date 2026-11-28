@@ -17,6 +17,7 @@ import {
 } from "@dohc/ydoc-projection/live-journal-validation";
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { formatProperty, isEditablePropertyValue } from "../../editor/document";
 import { createLiveAdapter } from "../../editor/liveAdapter";
 import { fromBase64, outgoing, toBase64, type FromPage, type ToPage } from "./liveBridge";
 import { liveLimits } from "./liveFixtures";
@@ -374,5 +375,47 @@ describe("the page's live connection", () => {
       currentPath: binding.currentPath,
     });
     expect(verdict.kind).toBe("accepted");
+  });
+
+  it("formats structured and bigint frontmatter without throwing and keeps undeclared lists read-only", () => {
+    const doc = markdownToYDoc(
+      "---\ncontacts:\n  - name: Ada\nbig:\n  id: 9007199254740993\ntags:\n  - travel\n  - family\n---\nbody\n",
+    );
+    const values = frontmatterMapValues(doc.getMap("frontmatter"));
+
+    expect(formatProperty(values.contacts, undefined, {}, "Empty")).toContain("Ada");
+    expect(formatProperty(values.big, undefined, {}, "Empty")).toContain("9007199254740993");
+    expect(formatProperty(values.tags, undefined, {}, "Empty")).toBe("travel, family");
+
+    expect(isEditablePropertyValue(values.contacts, undefined)).toBe(false);
+    expect(isEditablePropertyValue(values.big, undefined)).toBe(false);
+    expect(isEditablePropertyValue(9007199254740993n, { name: "Count", type: "number" })).toBe(
+      false,
+    );
+    expect(isEditablePropertyValue(values.tags, undefined)).toBe(false);
+    expect(isEditablePropertyValue(values.tags, { name: "tags", type: "text" })).toBe(false);
+    expect(
+      isEditablePropertyValue(["rec_1"], {
+        name: "Project",
+        type: "relation",
+        collection: "Projects",
+        many: false,
+      }),
+    ).toBe(false);
+    expect(
+      isEditablePropertyValue(values.tags, {
+        name: "tags",
+        type: "multi-select",
+        options: ["travel", "family"],
+      }),
+    ).toBe(true);
+    expect(
+      isEditablePropertyValue(["rec_1"], {
+        name: "Projects",
+        type: "relation",
+        collection: "Projects",
+        many: true,
+      }),
+    ).toBe(true);
   });
 });

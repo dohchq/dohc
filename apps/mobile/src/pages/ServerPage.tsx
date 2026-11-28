@@ -147,6 +147,16 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     () => (folder ? (docCollectionsState.value?.find((c) => c.path === folder) ?? null) : null),
     [docCollectionsState.value, folder],
   );
+  const insideDocCollection = useMemo(
+    () =>
+      Boolean(
+        folder &&
+        docCollectionsState.value?.some(
+          (c) => folder === c.path || folder.startsWith(`${c.path}/`),
+        ),
+      ),
+    [docCollectionsState.value, folder],
+  );
   const propertyFields = useMemo(() => docCollection?.fields ?? [], [docCollection]);
   const [relationLabels, setRelationLabels] = useState<Readonly<Record<string, string>>>({});
   const [editingProp, setEditingProp] = useState<{
@@ -255,7 +265,7 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
     !deleted &&
     objectId !== null &&
     !mutating;
-  const canRenameFile = canEditFiles && docCollection === null;
+  const canRenameFile = canEditFiles && !insideDocCollection;
   const canWriteProps = canWriteFiles(data, currentWorkspace) && !deleted && !mutating;
   const liveProps =
     canWriteProps && live !== null && liveState.shown && liveState.facts?.status === "live";
@@ -413,8 +423,16 @@ function PageScreen({ path, tap }: { path: string; tap?: number }) {
       typeof data.key === "string"
     ) {
       const val = ("value" in data ? data.value : null) as RecordValue;
-      const field =
-        propertyFields.find((f) => f.name === data.key) ?? inferPropertyField(data.key, val);
+      const defined = propertyFields.find((f) => f.name === data.key);
+      if (
+        defined
+          ? Array.isArray(val) &&
+            defined.type !== "multi-select" &&
+            !(defined.type === "relation" && defined.many)
+          : val !== null && typeof val === "object"
+      )
+        return;
+      const field = defined ?? inferPropertyField(data.key, val);
       fallbackPropReq.current = null;
       setPropError(null);
       setPropSaving(false);

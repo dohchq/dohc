@@ -204,15 +204,22 @@ function Files({
   const createAttempt = useRef<{ path: string; requestId: string } | null>(null);
   const { data, apps, collections } = useAccount();
   const { state: docCollectionsState } = useView(views.documentCollections);
+  const docCollectionPaths = useMemo(
+    () =>
+      !data?.joined && docCollectionsState.value?.length
+        ? new Set(docCollectionsState.value.map((c) => c.path))
+        : undefined,
+    [data?.joined, docCollectionsState.value],
+  );
   const rows = useMemo(
     () =>
       state.value
         ? homeRows(state.value, expanded, {
             showAllOthers,
-            excludeDocumentCollections: !data?.joined,
+            documentCollections: docCollectionPaths,
           })
         : null,
-    [state.value, expanded, showAllOthers, data?.joined],
+    [state.value, expanded, showAllOthers, docCollectionPaths],
   );
   const signIn = useSignIn();
   const openRowActions = useCallback(
@@ -544,15 +551,31 @@ function Files({
           onToggle={() => toggle(setCollapsed, "collections")}
         />
       ) : null}
-      {collapsed.has("collections") ? null : (
-        <>
-          {collectionsState.collections?.map((collection) => (
+      {collapsed.has("collections")
+        ? null
+        : [
+            ...(collectionsState.collections ?? []).map((collection) => ({
+              key: collection.datasetId,
+              name: collection.name,
+              onPressIn: () => void collections?.prefetch(collection.datasetId),
+              onPress: () =>
+                router.push({ pathname: "/collection", params: { id: collection.datasetId } }),
+            })),
+            ...(docCollectionsState.value ?? []).map((collection) => ({
+              key: `doc:${collection.path}`,
+              name: collection.name,
+              onPressIn: undefined,
+              onPress: () =>
+                router.push({
+                  pathname: "/document-collection",
+                  params: { path: collection.path },
+                }),
+            })),
+          ].map((item) => (
             <Pressable
-              key={collection.datasetId}
-              onPressIn={() => void collections?.prefetch(collection.datasetId)}
-              onPress={() =>
-                router.push({ pathname: "/collection", params: { id: collection.datasetId } })
-              }
+              key={item.key}
+              onPressIn={item.onPressIn}
+              onPress={item.onPress}
               android_ripple={{ color: theme.panel2 }}
               style={({ pressed }) => [
                 styles.row,
@@ -560,37 +583,14 @@ function Files({
                 pressed ? { backgroundColor: theme.panel2 } : null,
               ]}
               accessibilityRole="button"
-              accessibilityLabel={collection.name}
+              accessibilityLabel={item.name}
             >
               <Table2 size={18} color={theme.ink} strokeWidth={1.9} />
               <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
-                {collection.name}
+                {item.name}
               </Text>
             </Pressable>
           ))}
-          {docCollectionsState.value?.map((collection) => (
-            <Pressable
-              key={`doc:${collection.path}`}
-              onPress={() =>
-                router.push({ pathname: "/document-collection", params: { path: collection.path } })
-              }
-              android_ripple={{ color: theme.panel2 }}
-              style={({ pressed }) => [
-                styles.row,
-                styles.app,
-                pressed ? { backgroundColor: theme.panel2 } : null,
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel={collection.name}
-            >
-              <Table2 size={18} color={theme.ink} strokeWidth={1.9} />
-              <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
-                {collection.name}
-              </Text>
-            </Pressable>
-          ))}
-        </>
-      )}
       {fileSection("other", workspaceWords.otherFiles, rows?.others, () => setShowAllOthers(true))}
     </>
   );

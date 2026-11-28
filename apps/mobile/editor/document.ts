@@ -3,7 +3,10 @@
 import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
-import { frontmatterEditsRefused } from "@dohc/ydoc-projection/frontmatter";
+import {
+  frontmatterEditsRefused,
+  frontmatterValueFlowYaml,
+} from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
 import type * as Y from "yjs";
 import { post } from "./bridge";
@@ -40,7 +43,15 @@ export interface PageConfig {
   readonly autotype?: boolean;
 }
 
-function formatProperty(
+const formatFlow = (value: unknown): string => {
+  try {
+    return frontmatterValueFlowYaml(value);
+  } catch {
+    return "";
+  }
+};
+
+export function formatProperty(
   value: unknown,
   field: FieldDefinition | undefined,
   labels: Readonly<Record<string, string>>,
@@ -54,30 +65,51 @@ function formatProperty(
       .map((item) =>
         field?.type === "relation" && typeof item === "string"
           ? (labels[item] ?? item)
-          : String(item),
+          : item !== null && typeof item === "object"
+            ? formatFlow(item)
+            : String(item),
       )
       .join(", ");
   }
   if (field?.type === "relation" && typeof value === "string") return labels[value] ?? value;
-  if (typeof value === "object") return JSON.stringify(value);
+  if (typeof value === "object") return formatFlow(value);
   return String(value);
 }
 
-function isEditablePropertyValue(value: unknown, field: FieldDefinition | undefined): boolean {
+export function isEditablePropertyValue(
+  value: unknown,
+  field: FieldDefinition | undefined,
+): boolean {
   if (field?.type === "button") return false;
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  )
-    return true;
-  if (typeof value === "number") return Number.isFinite(value);
+  if (value === null || value === undefined) return true;
+  if (typeof value === "bigint") return false;
   if (Array.isArray(value))
-    return value.every(
-      (x) => typeof x === "string" || typeof x === "number" || typeof x === "boolean",
+    return (
+      (field?.type === "multi-select" || (field?.type === "relation" && field.many)) &&
+      value.every((item) => typeof item === "string")
     );
-  return false;
+  if (typeof value === "object") return false;
+  if (typeof value === "number" && !Number.isFinite(value)) return false;
+  if (field) {
+    switch (field.type) {
+      case "checkbox":
+        return typeof value === "boolean";
+      case "number":
+        return typeof value === "number";
+      case "select":
+      case "date":
+      case "url":
+      case "person":
+        return typeof value === "string";
+      case "relation":
+        return !field.many && typeof value === "string";
+      case "multi-select":
+        return false;
+      case "text":
+        return typeof value === "string" || typeof value === "number";
+    }
+  }
+  return typeof value === "string" || typeof value === "boolean" || typeof value === "number";
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(

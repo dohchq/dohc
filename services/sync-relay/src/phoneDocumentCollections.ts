@@ -20,7 +20,6 @@ import {
 import {
   isNormalizedRelativePath,
   isRecordId,
-  parseCollectionRecordFields,
   parseCollectionSchema,
   serializeCollectionSchema,
   validateFieldValue,
@@ -37,6 +36,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
+  loadMarkdownFrontmatter,
   writeMarkdownFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
 import { frontmatterMapValues } from "@dohc/ydoc-projection/frontmatter-map";
@@ -86,10 +86,16 @@ export const PHONE_DOC_COLLECTION_MAX_SCAN = 200;
 const MAX_COLLECTIONS = 200;
 const MAX_FIELDS = 32;
 const MAX_LIVE_OVERLAY_BYTES = 2 * 1024 * 1024;
+const MAX_DISPLAY_TITLE = 256;
+const MAX_DESCRIPTION = 1024;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
-const FRONTMATTER_BLOCK_RE = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/;
 const parentDir = (path: string) =>
   path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+const clipText = (text: string, max: number) => {
+  if (text.length <= max) return text;
+  const chars = [...text];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
+};
 
 function validateCollectionFolder(value: unknown, checkDest = false): string {
   if (
@@ -189,8 +195,7 @@ function readFrontmatter(
   } catch {
     return null;
   }
-  const block = FRONTMATTER_BLOCK_RE.exec(text)?.[0];
-  return block ? parseCollectionRecordFields(block) : null;
+  return loadMarkdownFrontmatter(text)?.meta ?? null;
 }
 
 function overlayLiveFrontmatter(
@@ -257,8 +262,10 @@ function parseSchemaBlob(ctx: StorageContext, workspaceId: string, sha256: strin
 
 const summaryOf = (folder: string, parsed: ReturnType<typeof parseCollectionSchema>) => ({
   path: folder,
-  name: parsed.schema.name?.trim() || posix.basename(folder),
-  description: parsed.schema.description,
+  name: clipText(parsed.schema.name?.trim() || posix.basename(folder), MAX_DISPLAY_TITLE),
+  description: parsed.schema.description
+    ? clipText(parsed.schema.description, MAX_DESCRIPTION)
+    : null,
   status: parsed.status,
   fields: parsed.schema.fields as FieldDefinition[],
 });
@@ -286,6 +293,7 @@ export function runPhoneDocumentCollectionRead(
         const folder = parentDir(schemaPath);
         if (
           !folder ||
+          Buffer.byteLength(folder, "utf8") > 512 ||
           hiddenFile(schemaPath) ||
           folder.split("/").some((s) => s.startsWith(".")) ||
           hasDatasetAncestor(ctx, workspaceId, folder)
@@ -403,10 +411,12 @@ export function runPhoneDocumentCollectionRead(
       entry.frontmatter ??
       {};
     const rawId = raw[RECORD_ID_FRONTMATTER_KEY];
-    const title =
+    const title = clipText(
       typeof raw.title === "string" && raw.title.trim()
         ? raw.title.trim()
-        : posix.basename(entry.path).replace(/\.md$/i, "");
+        : posix.basename(entry.path).replace(/\.md$/i, ""),
+      MAX_DISPLAY_TITLE,
+    );
     const values: Record<string, unknown> = {};
     for (const field of schemaFields) {
       if (!Object.hasOwn(raw, field.name)) continue;
@@ -452,7 +462,10 @@ export function runPhoneDocumentCollectionRead(
       for (const id of relationIds) {
         const hit = lookup.get(workspaceId, id);
         if (typeof hit?.path === "string" && !hiddenFile(hit.path))
-          relationLabels[id] = posix.basename(hit.path).replace(/\.md$/i, "");
+          relationLabels[id] = clipText(
+            posix.basename(hit.path).replace(/\.md$/i, ""),
+            MAX_DISPLAY_TITLE,
+          );
       }
     });
   }

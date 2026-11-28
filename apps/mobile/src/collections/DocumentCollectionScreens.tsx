@@ -4,7 +4,7 @@ import { documentWords } from "@dohc/interface-words/documents";
 import type { FieldDefinition } from "@dohc/workspace-contracts/collection";
 import * as Haptics from "expo-haptics";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import { ArrowUpDown, Ellipsis, Plus, Search, X } from "lucide-react-native";
+import { Ellipsis, Plus } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
@@ -37,13 +37,13 @@ import type { RecordCursor, RecordId, RecordValue } from "../server/phoneCollect
 import {
   coerceDocumentFieldValue,
   documentCollectionWrites,
-  PHONE_DOC_COLLECTION_MAX_SCAN,
   readDocumentCollectionRecords,
   validateCollectionFolderName,
   type DocumentCollectionRecord,
   type DocumentCollectionSummary,
+  type DocumentCollectionWriteResult,
 } from "../server/phoneDocumentCollections";
-import { views, type ReadProblem } from "../server/workspaceData";
+import { views, type ReadProblem, type WorkspaceData } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { ripple, TOUCH } from "../touch";
 import { EmptyLine, HoldRow, ScreenFailure } from "../workspace/ListStates";
@@ -62,13 +62,10 @@ function fieldSpec(field: FieldDefinition): FieldInputSpec {
   };
 }
 
-const fieldDraft = (f: FieldDefinition, v: RecordValue | undefined, emptyDate: boolean): Draft => {
-  const s = fieldSpec(f);
-  return draftOf({ type: s.type, relation: s.relation }, v, { emptyDate });
-};
-
 const toJsonKeyLabels = (raw?: Readonly<Record<string, string>>) =>
-  raw ? Object.fromEntries(Object.entries(raw).map(([id, l]) => [JSON.stringify(id), l])) : {};
+  raw
+    ? Object.fromEntries(Object.entries(raw).map(([id, label]) => [JSON.stringify(id), label]))
+    : {};
 
 function useMounted() {
   const ref = useRef(true);
@@ -101,18 +98,15 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
   const [records, setRecords] = useState<readonly DocumentCollectionRecord[]>([]);
   const [relationLabels, setRelationLabels] = useState<Readonly<Record<string, string>>>({});
   const [nextPath, setNextPath] = useState<string | null>(null);
-  const [bounded, setBounded] = useState(false);
   const [missing, setMissing] = useState(false);
   const [reading, setReading] = useState<"first" | "refresh" | "more" | null>("first");
   const [problem, setProblem] = useState<{ cause: ReadProblem; more: boolean } | null>(null);
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [sort, setSort] = useState<{ field: string; direction: "asc" | "desc" } | null>(null);
   const [creating, setCreating] = useState(false);
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const mounted = useMounted();
+  const jsonLabels = useMemo(() => toJsonKeyLabels(relationLabels), [relationLabels]);
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const load = useCallback(
@@ -128,12 +122,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
         const { value } = await readDocumentCollectionRecords(
           signIn.client,
           active.workspaceId,
-          {
-            collectionPath,
-            ...(after ? { afterPath: after } : {}),
-            ...(search ? { search } : {}),
-            ...(sort ? { sortField: sort.field, sortDirection: sort.direction } : {}),
-          },
+          { collectionPath, ...(after ? { afterPath: after } : {}) },
           abort.signal,
         );
         if (!mounted.current || abort.signal.aborted || !signIn.isCurrent() || !active.isOpen())
@@ -145,7 +134,6 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
         }
         setMissing(false);
         setCollection(value.collection);
-        setBounded(value.bounded);
         setNextPath(value.nextPath);
         setRelationLabels((cur) =>
           after ? { ...cur, ...value.relationLabels } : value.relationLabels,
@@ -164,60 +152,14 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
         setReading(null);
       }
     },
-    [collectionPath, data, mounted, search, signIn, sort],
+    [collectionPath, data, mounted, signIn],
   );
-
-  useEffect(() => {
-    const trimmed = searchInput.trim();
-    if (trimmed === search) return;
-    const timer = setTimeout(() => setSearch(trimmed), 250);
-    return () => clearTimeout(timer);
-  }, [searchInput, search]);
 
   useFocusEffect(
     useCallback(() => {
       void load(collection ? "refresh" : "first");
     }, [load]),
   );
-
-  const clearQuery = useCallback(() => {
-    setSearchInput("");
-    setSearch("");
-    setSort(null);
-  }, []);
-  useBackCloses(Boolean(searchInput || sort), clearQuery);
-
-  const pickSort = async () => {
-    const toggle = (field: string) =>
-      setSort({
-        field,
-        direction: sort?.field === field && sort.direction === "asc" ? "desc" : "asc",
-      });
-    const items = [
-      ...(sort
-        ? [
-            {
-              label: collectionWords.reverseOrder,
-              run: () =>
-                setSort({
-                  field: sort.field,
-                  direction: sort.direction === "asc" ? "desc" : "asc",
-                }),
-            },
-            { label: collectionWords.defaultOrder, run: () => setSort(null) },
-          ]
-        : []),
-      { label: collectionWords.title, run: () => toggle("title") },
-      ...(collection?.fields ?? [])
-        .filter((f) => f.type !== "button" && f.type !== "multi-select")
-        .map((f) => ({ label: f.name, run: () => toggle(f.name) })),
-    ];
-    const picked = await choose({
-      title: collectionWords.sortBy,
-      options: items.map((i) => ({ label: i.label })),
-    });
-    if (picked !== null) items[picked]?.run();
-  };
 
   const removeRecord = async (record: DocumentCollectionRecord) => {
     if (!data || !canEdit || deletingPath !== null) return;
@@ -259,26 +201,8 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
         headerTransparent: false,
         headerStyle: { backgroundColor: theme.bg },
         headerShadowVisible: false,
-        headerRight: () => (
-          <View style={styles.headerButtons}>
-            <Pressable
-              onPress={() => void pickSort()}
-              hitSlop={8}
-              android_ripple={ripple(theme, true)}
-              style={styles.iconBtn}
-              accessibilityRole="button"
-              accessibilityLabel={
-                sort
-                  ? collectionWords.sortedBy(
-                      sort.field === "title" ? collectionWords.title : sort.field,
-                      sort.direction === "asc",
-                    )
-                  : collectionWords.sort
-              }
-            >
-              <ArrowUpDown size={22} color={sort ? theme.accent : theme.ink} strokeWidth={2} />
-            </Pressable>
-            {canEdit ? (
+        headerRight: canEdit
+          ? () => (
               <Pressable
                 onPress={() => setCreating(true)}
                 hitSlop={8}
@@ -289,9 +213,8 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
               >
                 <Plus size={24} color={theme.ink} strokeWidth={2} />
               </Pressable>
-            ) : null}
-          </View>
-        ),
+            )
+          : undefined,
       }}
     />
   );
@@ -305,44 +228,10 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
     );
 
   const visibleFields = (collection?.fields ?? []).filter((f) => f.type !== "button");
-  const jsonLabels = useMemo(() => toJsonKeyLabels(relationLabels), [relationLabels]);
 
   return (
     <View style={[styles.flex, { backgroundColor: theme.bg }]}>
       {header}
-      <View style={[styles.searchBar, { backgroundColor: theme.field }]}>
-        <Search size={18} color={theme.subtle} strokeWidth={2} />
-        <TextInput
-          value={searchInput}
-          onChangeText={setSearchInput}
-          placeholder={collectionWords.searchRecords}
-          placeholderTextColor={theme.subtle}
-          returnKeyType="search"
-          onSubmitEditing={() => setSearch(searchInput.trim())}
-          maxLength={200}
-          accessibilityLabel={collectionWords.searchRecords}
-          style={[styles.searchInput, { color: theme.ink }]}
-        />
-        {searchInput ? (
-          <Pressable
-            onPress={() => {
-              setSearchInput("");
-              setSearch("");
-            }}
-            android_ripple={ripple(theme, true)}
-            style={styles.iconBtn}
-            accessibilityRole="button"
-            accessibilityLabel={collectionWords.clearSearch}
-          >
-            <X size={18} color={theme.subtle} strokeWidth={2} />
-          </Pressable>
-        ) : null}
-      </View>
-      {bounded ? (
-        <Text style={[styles.note, { color: theme.muted }]}>
-          {collectionWords.boundedResults(PHONE_DOC_COLLECTION_MAX_SCAN)}
-        </Text>
-      ) : null}
       {problem ? (
         <View style={styles.pad}>
           <ProblemLine
@@ -438,7 +327,7 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
           reading === "first" ? (
             <HoldRow />
           ) : problem ? undefined : (
-            <EmptyLine text={search ? collectionWords.noMatches : collectionWords.noRecords} />
+            <EmptyLine text={collectionWords.noRecords} />
           )
         }
         ListFooterComponent={reading === "more" ? <HoldRow /> : undefined}
@@ -454,9 +343,36 @@ function DocumentRecords({ collectionPath }: { collectionPath: string }) {
         }
       />
       {canEdit && collection ? (
-        <NewDocumentRecordSheet
+        <CreateNameSheet
           open={creating}
-          collection={collection}
+          title={collectionWords.newRecord}
+          placeholder={collectionWords.recordNamePlaceholder}
+          fallbackError={collectionWords.couldntCreateRecord}
+          validate={(entered) => {
+            const built = buildTargetPath(collection.path, entered, ".md");
+            if (!built.ok)
+              return {
+                ok: false,
+                error: entered.trim()
+                  ? collectionWords.invalidRecordName
+                  : collectionWords.recordNameRequired,
+              };
+            return { ok: true, value: entered.trim().replace(/\.md$/i, "").trim() };
+          }}
+          submit={(active, client, value, requestId) =>
+            documentCollectionWrites(client, active.workspaceId).createRecord({
+              collectionPath: collection.path,
+              name: value,
+              requestId,
+            })
+          }
+          refusalText={(res) =>
+            res.refusal === "path-exists" ? collectionWords.recordExists : res.reason
+          }
+          invalidate={(active, path) => {
+            active.invalidate(views.files);
+            active.invalidate(views.page(path), true);
+          }}
           onClose={() => setCreating(false)}
           onCreated={(path) => {
             setCreating(false);
@@ -473,7 +389,59 @@ export function NewDocumentCollectionSheet(props: {
   readonly onClose: () => void;
   readonly onCreated: (folder: string) => void;
 }) {
-  const { open, onClose, onCreated } = props;
+  return (
+    <CreateNameSheet
+      open={props.open}
+      title={collectionWords.newCollection}
+      placeholder={collectionWords.collectionNamePlaceholder}
+      fallbackError={collectionWords.couldntCreateCollection}
+      validate={(entered) => {
+        const checked = validateCollectionFolderName(entered);
+        return checked.ok ? { ok: true, value: checked.folder } : checked;
+      }}
+      submit={(active, client, folder, requestId) =>
+        documentCollectionWrites(client, active.workspaceId).createCollection({
+          folder,
+          name: folder,
+          requestId,
+        })
+      }
+      refusalText={(res) =>
+        res.refusal === "folder-occupied" ? collectionWords.folderOccupied : res.reason
+      }
+      invalidate={(active) => {
+        active.invalidate(views.files);
+        active.invalidate(views.documentCollections);
+      }}
+      onClose={props.onClose}
+      onCreated={props.onCreated}
+    />
+  );
+}
+
+function CreateNameSheet(props: {
+  readonly open: boolean;
+  readonly title: string;
+  readonly placeholder: string;
+  readonly fallbackError: string;
+  readonly validate: (
+    entered: string,
+  ) =>
+    | { readonly ok: true; readonly value: string }
+    | { readonly ok: false; readonly error: string };
+  readonly submit: (
+    active: WorkspaceData,
+    client: ReturnType<typeof useSignIn>["client"],
+    value: string,
+    requestId: string,
+  ) => Promise<DocumentCollectionWriteResult>;
+  readonly refusalText: (
+    res: Extract<DocumentCollectionWriteResult, { readonly ok: false }>,
+  ) => string;
+  readonly invalidate: (active: WorkspaceData, path: string) => void;
+  readonly onClose: () => void;
+  readonly onCreated: (path: string) => void;
+}) {
   const theme = useTheme();
   const { data } = useAccount();
   const signIn = useSignIn();
@@ -484,16 +452,16 @@ export function NewDocumentCollectionSheet(props: {
   const [error, setError] = useState<string | null>(null);
   const requestId = useRef<string | null>(null);
   useEffect(() => {
-    if (!open) return;
+    if (!props.open) return;
     setName("");
     setSaving(false);
     setError(null);
     requestId.current = null;
-  }, [open]);
+  }, [props.open]);
 
-  const submit = async () => {
+  const run = async () => {
     if (saving || !data) return;
-    const checked = validateCollectionFolderName(name);
+    const checked = props.validate(name);
     if (!checked.ok) {
       setError(checked.error);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -504,28 +472,20 @@ export function NewDocumentCollectionSheet(props: {
     setSaving(true);
     setError(null);
     try {
-      const res = await documentCollectionWrites(
-        signIn.client,
-        active.workspaceId,
-      ).createCollection({
-        folder: checked.folder,
-        name: checked.folder,
-        requestId: requestId.current,
-      });
+      const res = await props.submit(active, signIn.client, checked.value, requestId.current);
       if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
       if (!res.ok) {
-        setError(res.refusal === "folder-occupied" ? collectionWords.folderOccupied : res.reason);
+        setError(props.refusalText(res));
         void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
         return;
       }
       requestId.current = null;
-      active.invalidate(views.files);
-      active.invalidate(views.documentCollections);
-      onCreated(res.path);
+      props.invalidate(active, res.path);
+      props.onCreated(res.path);
     } catch (cause) {
       if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
       const prob = shownProblem(cause);
-      setError(prob ? problemText(prob) : collectionWords.couldntCreateCollection);
+      setError(prob ? problemText(prob) : props.fallbackError);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       if (mounted.current) setSaving(false);
@@ -534,13 +494,13 @@ export function NewDocumentCollectionSheet(props: {
 
   return (
     <SheetFrame
-      open={open}
-      title={collectionWords.newCollection}
+      open={props.open}
+      title={props.title}
       saving={saving}
       savingLabel={collectionWords.creating}
       actionLabel={collectionWords.create}
-      onClose={onClose}
-      onAction={() => void submit()}
+      onClose={props.onClose}
+      onAction={() => void run()}
     >
       <ScrollView
         contentContainerStyle={styles.form}
@@ -554,13 +514,13 @@ export function NewDocumentCollectionSheet(props: {
             setError(null);
             requestId.current = null;
           }}
-          placeholder={collectionWords.collectionNamePlaceholder}
+          placeholder={props.placeholder}
           placeholderTextColor={theme.subtle}
           editable={!saving}
           autoFocus
           returnKeyType="done"
-          onSubmitEditing={() => void submit()}
-          accessibilityLabel={collectionWords.newCollection}
+          onSubmitEditing={() => void run()}
+          accessibilityLabel={props.title}
           style={[
             styles.input,
             {
@@ -575,179 +535,6 @@ export function NewDocumentCollectionSheet(props: {
             {error}
           </Text>
         ) : null}
-      </ScrollView>
-    </SheetFrame>
-  );
-}
-
-function NewDocumentRecordSheet(props: {
-  readonly open: boolean;
-  readonly collection: DocumentCollectionSummary;
-  readonly onClose: () => void;
-  readonly onCreated: (path: string) => void;
-}) {
-  const { open, collection, onClose, onCreated } = props;
-  const theme = useTheme();
-  const { data } = useAccount();
-  const signIn = useSignIn();
-  const problemText = useProblemText();
-  const mounted = useMounted();
-  const editableFields = useMemo(
-    () => collection.fields.filter((f) => f.type !== "button" && f.type !== "relation"),
-    [collection.fields],
-  );
-  const [name, setName] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const requestId = useRef<string | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    setName("");
-    setDrafts(
-      Object.fromEntries(editableFields.map((f) => [f.name, fieldDraft(f, undefined, true)])),
-    );
-    setErrors({});
-    setSubmitError(null);
-    setSaving(false);
-    requestId.current = null;
-  }, [open, editableFields]);
-
-  const submit = async () => {
-    if (saving || !data) return;
-    const built = buildTargetPath(collection.path, name, ".md");
-    const nextErrors: Record<string, string> = {};
-    if (!built.ok)
-      nextErrors.__name = name.trim()
-        ? collectionWords.invalidRecordName
-        : collectionWords.recordNameRequired;
-    const fields: Record<string, RecordValue> = {};
-    for (const field of editableFields) {
-      const coerced = coerceDocumentFieldValue(
-        field,
-        drafts[field.name] ?? fieldDraft(field, undefined, true),
-      );
-      if (!coerced.ok) nextErrors[field.name] = coerced.error;
-      else if (
-        coerced.value !== null &&
-        (!Array.isArray(coerced.value) || coerced.value.length > 0)
-      )
-        fields[field.name] = coerced.value;
-    }
-    if (Object.keys(nextErrors).length > 0) {
-      setErrors(nextErrors);
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      return;
-    }
-    const active = data;
-    requestId.current ??= newFileRequestId();
-    setSaving(true);
-    setSubmitError(null);
-    try {
-      const res = await documentCollectionWrites(signIn.client, active.workspaceId).createRecord({
-        collectionPath: collection.path,
-        name: name.trim().replace(/\.md$/i, "").trim(),
-        ...(Object.keys(fields).length > 0 ? { fields } : {}),
-        requestId: requestId.current,
-      });
-      if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
-      if (!res.ok) {
-        setSubmitError(res.refusal === "path-exists" ? collectionWords.recordExists : res.reason);
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        return;
-      }
-      requestId.current = null;
-      active.invalidate(views.files);
-      active.invalidate(views.page(res.path), true);
-      onCreated(res.path);
-    } catch (cause) {
-      if (!mounted.current || !signIn.isCurrent() || !active.isOpen()) return;
-      const prob = shownProblem(cause);
-      setSubmitError(prob ? problemText(prob) : collectionWords.couldntCreateRecord);
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-    } finally {
-      if (mounted.current) setSaving(false);
-    }
-  };
-
-  return (
-    <SheetFrame
-      open={open}
-      title={collectionWords.newRecord}
-      saving={saving}
-      savingLabel={collectionWords.creating}
-      actionLabel={collectionWords.create}
-      onClose={onClose}
-      onAction={() => void submit()}
-    >
-      <ScrollView
-        contentContainerStyle={styles.form}
-        keyboardShouldPersistTaps="handled"
-        automaticallyAdjustKeyboardInsets
-      >
-        {submitError ? (
-          <Text style={[styles.fieldError, { color: theme.danger }]} accessibilityRole="alert">
-            {submitError}
-          </Text>
-        ) : null}
-        <View style={styles.field}>
-          <Text style={[styles.label, { color: theme.muted }]}>{collectionWords.recordName} *</Text>
-          <TextInput
-            value={name}
-            onChangeText={(next) => {
-              setName(next);
-              setErrors(({ __name: _, ...rest }) => rest);
-              requestId.current = null;
-            }}
-            placeholder={collectionWords.recordNamePlaceholder}
-            placeholderTextColor={theme.subtle}
-            editable={!saving}
-            autoFocus
-            returnKeyType="done"
-            accessibilityLabel={collectionWords.recordName}
-            style={[
-              styles.input,
-              {
-                color: theme.ink,
-                backgroundColor: theme.panel,
-                borderColor: errors.__name ? theme.danger : theme.line,
-              },
-            ]}
-          />
-          {errors.__name ? (
-            <Text style={[styles.fieldError, { color: theme.danger }]} accessibilityRole="alert">
-              {errors.__name}
-            </Text>
-          ) : null}
-        </View>
-        {editableFields.map((field) => (
-          <View key={field.name} style={styles.field}>
-            {field.type === "checkbox" ? null : (
-              <Text style={[styles.label, { color: theme.muted }]}>{field.name}</Text>
-            )}
-            <FieldInput
-              field={fieldSpec(field)}
-              draft={drafts[field.name] ?? fieldDraft(field, undefined, true)}
-              onChange={(next) => {
-                setDrafts((cur) => ({ ...cur, [field.name]: next }));
-                setErrors((cur) => {
-                  if (!Object.hasOwn(cur, field.name)) return cur;
-                  const copy = { ...cur };
-                  delete copy[field.name];
-                  return copy;
-                });
-              }}
-              disabled={saving}
-              error={errors[field.name] ?? null}
-              onClearDate={
-                field.type === "date"
-                  ? () => setDrafts((cur) => ({ ...cur, [field.name]: "" }))
-                  : null
-              }
-            />
-          </View>
-        ))}
       </ScrollView>
     </SheetFrame>
   );
@@ -771,7 +558,8 @@ export function PropertyEditorSheet(props: {
   const [labels, setLabels] = useState<Readonly<Record<string, string>>>({});
   useEffect(() => {
     if (!open || !field) return;
-    setDraft(fieldDraft(field, value, false));
+    const spec = fieldSpec(field);
+    setDraft(draftOf({ type: spec.type, relation: spec.relation }, value, { emptyDate: false }));
     setLocalError(null);
     setLabels(toJsonKeyLabels(props.relationLabels));
   }, [open, field, value]);
@@ -950,21 +738,7 @@ function SheetFrame(props: {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  headerButtons: { flexDirection: "row", alignItems: "center", gap: 4 },
   iconBtn: { minWidth: TOUCH, minHeight: TOUCH, alignItems: "center", justifyContent: "center" },
-  searchBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginHorizontal: 16,
-    marginVertical: 8,
-    paddingLeft: 12,
-    paddingRight: 4,
-    borderRadius: 10,
-    minHeight: TOUCH,
-  },
-  searchInput: { flex: 1, fontSize: 17, paddingVertical: 8 },
-  note: { fontSize: 13, paddingHorizontal: 16, paddingBottom: 6 },
   pad: { paddingHorizontal: 16, paddingBottom: 8 },
   errLine: { fontSize: 14, paddingHorizontal: 16, paddingBottom: 8 },
   rowWrap: {
@@ -997,8 +771,6 @@ const styles = StyleSheet.create({
   strong: { fontWeight: "600" },
   title: { flex: 1, textAlign: "center", fontSize: 17, fontWeight: "600" },
   form: { padding: 16, gap: 16, paddingBottom: 48 },
-  field: { gap: 6 },
-  label: { fontSize: 13 },
   input: {
     fontSize: 17,
     minHeight: TOUCH,

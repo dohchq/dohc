@@ -9,8 +9,6 @@ import { FILE_WRITE_TIMEOUT_MS } from "./fileWrites";
 import type { RecordValue } from "./phoneCollections";
 import { isCursor, type Read } from "./workspaceReads";
 
-export const PHONE_DOC_COLLECTION_MAX_SCAN = 200;
-
 export interface DocumentCollectionSummary {
   readonly path: string;
   readonly name: string;
@@ -59,7 +57,7 @@ export type DocumentCollectionWriteResult =
       readonly reason: string;
     };
 
-const FIELD_TYPES = new Set<string>([
+const FIELD_TYPES = new Set([
   "text",
   "number",
   "checkbox",
@@ -71,7 +69,7 @@ const FIELD_TYPES = new Set<string>([
   "url",
   "button",
 ]);
-const REFUSALS = new Set<string>([
+const REFUSALS = new Set([
   "folder-occupied",
   "path-exists",
   "not-found",
@@ -83,18 +81,18 @@ const REFUSALS = new Set<string>([
 function readFieldDef(item: unknown): FieldDefinition | null {
   if (
     !isFields(item) ||
-    !text(item.name, 256) ||
+    !text(item.name, 65_536) ||
     typeof item.type !== "string" ||
     !FIELD_TYPES.has(item.type)
   )
     return null;
   const type = item.type as CollectionFieldType;
   if (type === "select" || type === "multi-select") {
-    const options = each(item.options, (opt) => (text(opt, 512) ? opt : null));
+    const options = each(item.options, (opt) => (text(opt, 65_536) ? opt : null));
     return options ? { name: item.name, type, options } : null;
   }
   if (type === "relation")
-    return text(item.collection, 512) && typeof item.many === "boolean"
+    return text(item.collection, 65_536) && typeof item.many === "boolean"
       ? { name: item.name, type, collection: item.collection, many: item.many }
       : null;
   return { name: item.name, type };
@@ -215,9 +213,11 @@ export function readDocumentCollectionRecords(
         typeof result.bounded !== "boolean"
       )
         return null;
-      const relationLabels: Record<string, string> = {};
-      for (const [k, v] of Object.entries(result.relationLabels))
-        if (text(v, 1024)) relationLabels[k] = v;
+      const relationLabels = Object.fromEntries(
+        Object.entries(result.relationLabels).filter((entry): entry is [string, string] =>
+          text(entry[1], 1024),
+        ),
+      );
       return {
         kind: "ready",
         collection,
@@ -236,8 +236,12 @@ function readWriteResult(body: unknown): DocumentCollectionWriteResult | null {
   const result = answer && isFields(answer.result) ? answer.result : null;
   if (!result || typeof result.ok !== "boolean") return null;
   if (result.ok) {
-    if (!text(result.path, 1024) || !text(result.objectId, 256)) return null;
-    if (result.recordId !== undefined && !text(result.recordId, 64)) return null;
+    if (
+      !text(result.path, 1024) ||
+      !text(result.objectId, 256) ||
+      (result.recordId !== undefined && !text(result.recordId, 64))
+    )
+      return null;
     return {
       ok: true,
       path: result.path,
@@ -245,17 +249,15 @@ function readWriteResult(body: unknown): DocumentCollectionWriteResult | null {
       ...(result.recordId !== undefined ? { recordId: result.recordId } : {}),
     };
   }
-  if (
-    typeof result.refusal !== "string" ||
-    !REFUSALS.has(result.refusal) ||
-    !text(result.reason, 512)
-  )
-    return null;
-  return {
-    ok: false,
-    refusal: result.refusal as DocumentCollectionWriteRefusal,
-    reason: result.reason,
-  };
+  return typeof result.refusal === "string" &&
+    REFUSALS.has(result.refusal) &&
+    text(result.reason, 512)
+    ? {
+        ok: false,
+        refusal: result.refusal as DocumentCollectionWriteRefusal,
+        reason: result.reason,
+      }
+    : null;
 }
 
 export function documentCollectionWrites(client: ServerClient, workspaceId: string) {
