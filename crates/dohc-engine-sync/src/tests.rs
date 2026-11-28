@@ -1457,6 +1457,7 @@ mod outbound_authors;
 pub(crate) mod owner_publication;
 mod record_file_edit;
 mod recover;
+mod recovery_converges;
 mod relay_pull;
 mod relay_pull_bench;
 mod released_copy;
