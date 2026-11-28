@@ -1653,10 +1653,16 @@ const lineageEndings = (oneObject: boolean, forRead = false) => {
     UNION ALL ${roomEndings(object)}
     UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND ${forRead ? "(state<>'off' OR host_drained_at_ms IS NULL)" : "state<>'starting'"}`;
 };
+const unretiredRoom = (kind: string, table: string) =>
+  `SELECT '${kind}',object_id FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id<>?
+    AND NOT EXISTS(SELECT 1 FROM sync_relay_live_documents d WHERE d.workspace_id=${table}.workspace_id
+      AND d.main_version_id=${table}.main_version_id AND d.object_id=${table}.object_id
+      AND d.lineage_claim_id=${table}.lineage_claim_id AND d.lineage_state='retired')`;
 const resolvedLineageEndings =
   () => `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS}
     WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
-  UNION ALL ${roomEndings(" AND object_id=? AND lineage_claim_id<>?")}`;
+  UNION ALL ${unretiredRoom("room-edits", LIVE_ROOM_EDITS)}
+  UNION ALL ${unretiredRoom("pause", LIVE_ROOM_PAUSES)}`;
 
 export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
 export type RelayLiveNote = { objectId: string; kinds: RelayLiveNoteKind[] };
