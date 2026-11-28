@@ -166,6 +166,8 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       "    type: relation",
       "    collection: Projects",
       "    many: false",
+      "  __proto__:",
+      "    type: text",
     ].join("\n");
     const projectRecId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
     const largeBody = "x".repeat(25_000);
@@ -194,7 +196,7 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       },
       {
         path: "Tasks/Beta.md",
-        text: `---   \ntitle: "${"LongTitle".repeat(200)}"\nStatus: Done\n---  \nBody\n`,
+        text: `---   \ntitle: "${"LongTitle".repeat(200)}"\nStatus: Done\n__proto__: safe-val\n---  \nBody\n`,
         objectId: "obj-beta",
       },
       { path: "Tasks/.hidden.md", text: "---\nStatus: Secret\n---\n" },
@@ -252,7 +254,9 @@ describe("Document Collection relay-table reads (zero ServerCopies)", () => {
       Status: "Done",
       Project: projectRecId,
     });
-    expect(recBody.result.records[1]?.values).toEqual({ Status: "Done" });
+    expect(recBody.result.records[1]?.values).toMatchObject({ Status: "Done" });
+    expect(Object.hasOwn(recBody.result.records[1]!.values, "__proto__")).toBe(true);
+    expect(recBody.result.records[1]?.values["__proto__"]).toBe("safe-val");
     expect(recBody.result.records[1]?.title.length).toBeLessThanOrEqual(256);
     expect(recBody.result.relationLabels).toEqual({ [projectRecId]: "Launch" });
   });

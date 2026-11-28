@@ -397,7 +397,7 @@ export function runPhoneDocumentCollectionRead(
         : posix.basename(entry.path).replace(/\.md$/i, ""),
       MAX_DISPLAY_TITLE,
     );
-    const values: Record<string, unknown> = {};
+    const values: Record<string, unknown> = Object.create(null);
     for (const field of schemaFields) {
       if (!Object.hasOwn(raw, field.name)) continue;
       const val = sanitizeJson(raw[field.name]);

@@ -203,7 +203,9 @@ function Files({
   const createAbort = useRef<AbortController | null>(null);
   const createAttempt = useRef<{ path: string; requestId: string } | null>(null);
   const { data, apps, collections } = useAccount();
-  const { state: docCollectionsState } = useView(views.documentCollections);
+  const { state: docCollectionsState, retry: retryDocCollections } = useView(
+    views.documentCollections,
+  );
   const docCollectionPaths = useMemo(
     () =>
       !data?.joined && docCollectionsState.value?.length
@@ -350,6 +352,12 @@ function Files({
     collectionsFailed,
     collectionsState,
     retryCollections,
+  );
+  useFailureNotice(
+    `read:${workspaceId}:doc-collections`,
+    collectionsFailed,
+    docCollectionsState,
+    retryDocCollections,
   );
 
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
