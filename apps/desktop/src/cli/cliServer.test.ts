@@ -2566,6 +2566,16 @@ describe("CLI socket server", () => {
         name: "Waitlist",
         collectionPath: "waitlist",
       });
+      await send("webhookCreate", {
+        name: "Waitlist",
+        collection: "waitlist",
+        form: { fields: ["email"] },
+      });
+      expect(agentSetup.createWebhook).toHaveBeenLastCalledWith(WORKSPACE_ID, {
+        name: "Waitlist",
+        collectionPath: "waitlist",
+        form: { fields: ["email"] },
+      });
       expect(await send("webhookList")).toMatchObject({
         ok: true,
         result: { kind: "ready", webhooks: [webhook] },

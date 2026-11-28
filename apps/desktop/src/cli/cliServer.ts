@@ -30,6 +30,7 @@ import {
   type ScheduleHostResult,
 } from "@dohc/workspace-contracts/relay";
 import type {
+  IncomingWebhookCreateInput,
   IncomingWebhookCreatedResult,
   IncomingWebhooksState,
 } from "@dohc/workspace-contracts/incoming-webhooks";
@@ -741,7 +742,7 @@ export interface CliServerOptions {
     listWebhooks(workspaceId: string): Promise<IncomingWebhooksState>;
     createWebhook(
       workspaceId: string,
-      input: { name: string; collectionPath: string },
+      input: IncomingWebhookCreateInput,
     ): Promise<IncomingWebhookCreatedResult>;
   };
   noteConversion?: { convert(workspaceId: string): Promise<ConvertNotesResult> };
@@ -3507,7 +3508,11 @@ const DECLARED_WRITERS: {
     try {
       const { webhook, endpointUrl } = await options.agentSetup!.createWebhook(
         context.workspaceId,
-        { name: request.args.name, collectionPath: request.args.collection },
+        {
+          name: request.args.name,
+          collectionPath: request.args.collection,
+          ...(request.args.form ? { form: request.args.form } : {}),
+        },
       );
       return { ok: true as const, webhook, endpointUrl };
     } catch (error) {

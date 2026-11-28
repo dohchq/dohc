@@ -717,18 +717,19 @@ Only the owner's own agents set up the workspace. Shared profiles do not offer t
 
 No arguments.
 
-Returns `{ kind: "none" } | { kind: "unavailable", message } | { kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }[], limit }`.
+Returns `{ kind: "none" } | { kind: "unavailable", message } | { kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }[], limit }`.
 
 ### `dohc_create_incoming_webhook`
 
-Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.
+Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. For an address that a public web page posts to, pass form.fields with the field names to keep, such as ["email", "source"]: it then takes only form posts, drops every other field, and allows each network a few posts a day. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.
 
 Changes the workspace, so a shared view does not offer it.
 
 - `name`: `string`. Required.
 - `collection`: `string`. Required.
+- `form`: `{ fields: string[] }`
 
-Returns `{ ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }, endpointUrl } | { ok: false, reason }`.
+Returns `{ ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }, endpointUrl } | { ok: false, reason }`.
 
 ---
 
@@ -1415,7 +1416,7 @@ dohc webhook list [options]
 
 List this workspace's incoming webhooks and their recent deliveries.
 
-With `--json`, prints `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "unavailable", message }` or `{ schemaVersion, kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }[], limit }`.
+With `--json`, prints `{ schemaVersion, kind: "none" }` or `{ schemaVersion, kind: "unavailable", message }` or `{ schemaVersion, kind: "ready", serverOrigin, webhooks: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }[], limit }`.
 
 #### `dohc webhook create`
 
@@ -1425,11 +1426,12 @@ dohc webhook create <name> [options]
 
 Create an incoming webhook address that adds records to a private Collection.
 
-The address is a secret: anyone who has it can add records. dohc shows it once. If you don't know whether a create worked, run dohc webhook list before you try again. Creating needs the server to run this workspace's automations, with no handover waiting, and a synced Collection.
+The address is a secret: anyone who has it can add records. dohc shows it once. A website form address goes in a public page. It takes only form posts, keeps only the named fields, and allows each network a few posts a day. If you don't know whether a create worked, run dohc webhook list before you try again. Creating needs the server to run this workspace's automations, with no handover waiting, and a synced Collection.
 
 - `--collection <path>`: Required. The Collection's folder, relative to the workspace root.
+- `--form-fields <names>`: Make a website form address. Comma-separated field names to keep, such as email,source. dohc drops every other field.
 
-With `--json`, prints `{ schemaVersion, ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, pendingCount, recentDeliveries }, endpointUrl }`.
+With `--json`, prints `{ schemaVersion, ok: true, webhook: { webhookId, name, collectionPath, collectionId, paused, pauseReason, createdAtMs, updatedAtMs, lastDeliveryAtMs, form?, pendingCount, recentDeliveries }, endpointUrl }`.
 
 ### `dohc member-apps`
 

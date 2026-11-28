@@ -628,7 +628,10 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
     }
     case "webhookCreate": {
       const created = result as Extract<CliResultByVerb["webhookCreate"], { ok: true }>;
-      return `Created ${lineSafe(created.webhook.name)} for ${lineSafe(created.webhook.collectionPath)}. Keep this address secret; dohc shows it once:
+      const keep = created.webhook.form
+        ? `It is a website form address: anyone who loads your page can post to it, and dohc keeps only ${created.webhook.form.fields.map(lineSafe).join(", ")}. dohc shows it once:`
+        : "Keep this address secret; dohc shows it once:";
+      return `Created ${lineSafe(created.webhook.name)} for ${lineSafe(created.webhook.collectionPath)}. ${keep}
 ${created.endpointUrl}`;
     }
     case "documentRead": {

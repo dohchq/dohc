@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  clientAddress,
   fatal,
   installShutdown,
   parseGracePeriodMs,
@@ -16,7 +17,6 @@ import { createDeviceControlBridge } from "./deviceControlBridge";
 import { createLiveGateway, namedSessionCheckIntervalMs } from "./liveGateway";
 import { createNamedLiveRelayRoute, namedLiveGatewayRequest } from "./namedLiveRelayRoute";
 import { ownerLiveSession } from "./liveGatewayRequest";
-import { clientAddress } from "./clientAddress";
 import { NAMED_COLLECTIONS_API, NAMED_COLLECTIONS_REQUEST_BYTES } from "./namedCollections";
 import {
   createShareWebApplication,

@@ -104,6 +104,34 @@ describe("parseCliArguments", () => {
     expect(
       parseCliArguments(["webhook", "create", "Waitlist", "--collection", "forms/waitlist"], {}),
     ).toMatchObject({ verb: "webhookCreate", name: "Waitlist", collection: "forms/waitlist" });
+    expect(
+      parseCliArguments(
+        [
+          "webhook",
+          "create",
+          "Waitlist",
+          "--collection",
+          "waitlist",
+          "--form-fields",
+          "email, source",
+        ],
+        {},
+      ),
+    ).toMatchObject({ verb: "webhookCreate", form: { fields: ["email", "source"] } });
+    expect(() =>
+      parseCliArguments(
+        [
+          "webhook",
+          "create",
+          "Waitlist",
+          "--collection",
+          "waitlist",
+          "--form-fields",
+          "email,email",
+        ],
+        {},
+      ),
+    ).toThrow();
     expect(() => parseCliArguments(["webhook", "create", "Waitlist"], {})).toThrow(
       "webhook create requires a name and --collection <path>",
     );

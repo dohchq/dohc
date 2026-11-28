@@ -2,7 +2,11 @@ import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { INBOX_COLLECTION_YAML, INBOX_SCHEMA_PATH } from "@dohc/workspace-contracts/inbox";
 import {
   INCOMING_WEBHOOK_DAILY_DELIVERY_CAP,
+  INCOMING_WEBHOOK_FORM_SENDER_BURST,
+  INCOMING_WEBHOOK_FORM_SENDER_DAILY,
   MAX_INCOMING_WEBHOOK_BODY_BYTES,
+  MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES,
+  MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT,
   MAX_INCOMING_WEBHOOK_PENDING_BYTES,
   MAX_INCOMING_WEBHOOK_PENDING_COUNT,
   MAX_INCOMING_WEBHOOKS_PER_WORKSPACE,
@@ -29,12 +33,15 @@ import {
   INCOMING_WEBHOOK_RETRY_BASE_MS,
 } from "./storage/incomingWebhooks";
 import {
+  closeTestStorage,
   closeTestStorages,
   countRows,
   createShare,
   inspect,
+  inspectDatabase,
   jsonBody,
   LINK_KEY,
+  reopenTestStorage,
   request,
   storagePath,
   testHandler,
@@ -295,6 +302,223 @@ describe("incoming webhooks relay routes and drain", () => {
     const listed = await handler(request("owner", "/sync/ws-1/webhooks"));
     expect(listed.status).toBe(200);
     expect(listed.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("keeps a website form to its fields, gives each network a share, and gives the form its own queue", async () => {
+    const { storage, handler, advanceMs } = await setup();
+    const created = await handler(
+      request("owner", "/sync/ws-1/webhooks", {
+        ...jsonBody({
+          name: "Waitlist",
+          collectionPath: "Inbox",
+          form: { fields: ["email", "source"] },
+        }),
+        method: "POST",
+      }),
+    );
+    expect(created.status).toBe(201);
+    const { token, webhook } = (await created.json()) as {
+      token: string;
+      webhook: { webhookId: string; form: unknown };
+    };
+    expect(webhook.form).toEqual({ fields: ["email", "source"] });
+    const plain = (await (
+      await handler(
+        request("owner", "/sync/ws-1/webhooks", {
+          ...jsonBody({ name: "Shortcut", collectionPath: "Inbox" }),
+          method: "POST",
+        }),
+      )
+    ).json()) as { token: string; webhook: Record<string, unknown> };
+    // An older desktop parses an ordinary webhook's summary strictly.
+    expect(plain.webhook).not.toHaveProperty("form");
+
+    const chargedBytes = () =>
+      inspect(storagePath(storage), (db) =>
+        Number(
+          (
+            db
+              .prepare(
+                "SELECT storage_bytes FROM sync_relay_incoming_webhooks WHERE webhook_id = ?",
+              )
+              .get(webhook.webhookId) as { storage_bytes: number }
+          ).storage_bytes,
+        ),
+      );
+    const createdBytes = chargedBytes();
+    const renamed = await handler(
+      request("owner", `/sync/ws-1/webhooks/${webhook.webhookId}`, {
+        ...jsonBody({ name: "Waitlis2" }),
+        method: "PATCH",
+      }),
+    );
+    expect(renamed.status).toBe(200);
+    expect(chargedBytes()).toBe(createdBytes);
+
+    let nextSender = 0;
+    const post = (
+      body: string,
+      init: {
+        sender?: string;
+        contentType?: string;
+        hook?: string;
+        headers?: Record<string, string>;
+      } = {},
+    ) =>
+      handler(
+        publicHookRequest(init.hook ?? token, {
+          headers: {
+            "content-type": init.contentType ?? "application/x-www-form-urlencoded",
+            "x-dohc-relay-client-ip": init.sender ?? `198.51.100.${++nextSender}`,
+            ...init.headers,
+          },
+          body,
+        }),
+      );
+    const answer = async (response: Response) => ({
+      status: response.status,
+      error: ((await response.json()) as { error?: string }).error,
+    });
+
+    const kept = await post("email=ada%40example.com&source=site&card=4111111111111111", {
+      headers: { "x-event-type": "Claim your prize", "user-agent": "Claim your prize" },
+    });
+    expect(kept.status).toBe(202);
+    const { deliveryId } = (await kept.json()) as { deliveryId: string };
+    const stored = inspect(storagePath(storage), (db) =>
+      db
+        .prepare(
+          "SELECT payload_blob, headers_json FROM sync_relay_webhook_deliveries WHERE delivery_id = ?",
+        )
+        .get(deliveryId),
+    ) as { payload_blob: Uint8Array; headers_json: string };
+    expect(Buffer.from(stored.payload_blob).toString("utf8")).toBe(
+      "email=ada%40example.com&source=site",
+    );
+    expect(JSON.parse(stored.headers_json)).toEqual({});
+
+    expect(
+      (await post('{"email":"ada@example.com"}', { contentType: "application/json" })).status,
+    ).toBe(415);
+    expect(await answer(await post("card=4111111111111111"))).toMatchObject({ status: 422 });
+    expect(await answer(await post("email=not-an-address"))).toMatchObject({ status: 422 });
+    expect(await answer(await post("email=a%40example.com&email=b%40example.com"))).toMatchObject({
+      status: 422,
+    });
+    expect((await post(`email=${"a".repeat(MAX_INCOMING_WEBHOOK_FORM_BODY_BYTES)}`)).status).toBe(
+      413,
+    );
+
+    // One network's burst, then a refusal. Addresses in the same IPv6 /64 share it; the next /64 does not.
+    const burst = async (sender: string) => {
+      const statuses: number[] = [];
+      for (let i = 0; i <= INCOMING_WEBHOOK_FORM_SENDER_BURST; i += 1) {
+        statuses.push(
+          (await post(`email=s${i}%40example.com`, { sender: `${sender}${i + 1}` })).status,
+        );
+      }
+      return statuses;
+    };
+    expect(await burst("2001:db8:1:2::")).toEqual([
+      ...Array.from({ length: INCOMING_WEBHOOK_FORM_SENDER_BURST }, () => 202),
+      429,
+    ]);
+    expect(
+      await answer(await post("email=late%40example.com", { sender: "2001:db8:1:2:ffff::1" })),
+    ).toEqual({ status: 429, error: "too many submissions from this network" });
+    expect((await post("email=next%40example.com", { sender: "2001:db8:1:3::1" })).status).toBe(
+      202,
+    );
+    advanceMs(86_400_000);
+    expect((await post("email=tomorrow%40example.com", { sender: "2001:db8:1:2::9" })).status).toBe(
+      202,
+    );
+
+    // The form's own queue fills while the workspace's other webhooks keep their share.
+    const pending = () =>
+      inspect(storagePath(storage), (db) =>
+        Number(
+          (
+            db
+              .prepare(
+                "SELECT COUNT(*) AS count FROM sync_relay_webhook_deliveries WHERE state IN ('pending', 'accepted')",
+              )
+              .get() as { count: number }
+          ).count,
+        ),
+      );
+    while (pending() < MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT) {
+      advanceMs(60_000);
+      expect((await post("email=fill%40example.com")).status).toBe(202);
+    }
+    advanceMs(60_000);
+    expect(await answer(await post("email=full%40example.com"))).toEqual({
+      status: 429,
+      error: `form webhook pending queue full (${MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT} of ${MAX_INCOMING_WEBHOOK_FORM_PENDING_COUNT} deliveries)`,
+    });
+    expect(
+      (await post('{"title":"still open"}', { hook: plain.token, contentType: "application/json" }))
+        .status,
+    ).toBe(202);
+  });
+
+  it("never lets one network past its daily share in any 24 hours", async () => {
+    const { storage, handler, advanceMs } = await setup();
+    const { token } = (await (
+      await handler(
+        request("owner", "/sync/ws-1/webhooks", {
+          ...jsonBody({ name: "Waitlist", collectionPath: "Inbox", form: { fields: ["email"] } }),
+          method: "POST",
+        }),
+      )
+    ).json()) as { token: string };
+    let accepted = 0;
+    for (let minute = 0; minute < 24 * 60; minute += 10) {
+      const response = await handler(
+        publicHookRequest(token, {
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            "x-dohc-relay-client-ip": "203.0.113.50",
+          },
+          body: `email=n${minute}%40example.com`,
+        }),
+      );
+      if (response.status === 202) {
+        accepted += 1;
+        // Settle it, so the form's own queue share never decides the count.
+        const db = inspectDatabase(storagePath(storage));
+        db.exec("UPDATE sync_relay_webhook_deliveries SET state = 'settled', payload_blob = NULL");
+        db.close();
+      }
+      advanceMs(10 * 60_000);
+    }
+    expect(accepted).toBeLessThanOrEqual(INCOMING_WEBHOOK_FORM_SENDER_DAILY);
+    expect(accepted).toBeGreaterThanOrEqual(INCOMING_WEBHOOK_FORM_SENDER_DAILY - 1);
+  });
+
+  it("adds the form column to a store opened by an older build", async () => {
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
+    closeTestStorage(storage);
+    const db = inspectDatabase(dbPath);
+    db.exec("ALTER TABLE sync_relay_incoming_webhooks DROP COLUMN form_json");
+    db.exec("DELETE FROM sync_relay_migrations WHERE migration_id = 'incoming-webhook-form-v1'");
+    db.close();
+    closeTestStorage(reopenTestStorage(dbPath));
+    expect(
+      inspect(dbPath, (inspected) => ({
+        column: inspected
+          .prepare(
+            "SELECT name FROM pragma_table_info('sync_relay_incoming_webhooks') WHERE name = 'form_json'",
+          )
+          .get(),
+        marked: inspected
+          .prepare(
+            "SELECT 1 AS marked FROM sync_relay_migrations WHERE migration_id = 'incoming-webhook-form-v1'",
+          )
+          .get(),
+      })),
+    ).toEqual({ column: { name: "form_json" }, marked: { marked: 1 } });
   });
 
   it("enforces public ingress defenses: method, loop depth, opaque 404 before rate limit, content-type, streaming 256 KiB cap, allowlisted headers, idempotency, and per-endpoint burst", async () => {

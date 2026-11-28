@@ -809,6 +809,20 @@ and turn each delivery into a quarantined Markdown record inside a private Colle
   header, and the browser reports a network failure. There is no `OPTIONS` handler, so only
   CORS simple requests (a form-encoded or plain-text body without custom headers) work from
   a browser. Owner management routes send no CORS headers.
+- **Website form addresses.** A webhook created with `form.fields` is meant to sit in a public
+  page. Its ingress keys a token bucket (5 burst, refilled so a sender gets at most 20 in any 24 hours) on the webhook and the sender's
+  address, with IPv6 senders grouped by /64, and checks it before the endpoint bucket so a
+  refused sender spends none of the endpoint's share. The relay takes the sender from
+  `X-Forwarded-For` only on `/sync/hooks/*` and only when the peer is listed in
+  `DOHC_RELAY_TRUSTED_PROXIES`. Every other route keeps the peer address, so a forged header
+  can't move another limiter's bucket. The bucket lives in memory, so a relay restart or an
+  eviction under many new addresses gives a sender a fresh share. The daily cap still holds.
+  The address takes only `application/x-www-form-urlencoded` bodies up to 8 KiB. Before hashing
+  and queueing, the relay keeps only the listed fields, stores no request headers for the record, and refuses a post with none of them,
+  a repeated listed field, a value over 500 characters, or an `email` that is not an email address.
+  A form webhook holds at most 20 pending deliveries, checked before the workspace budget.
+  Nothing proves a person sent the post: a sender who rotates networks still reaches the
+  daily cap with records shaped like the form.
 - **Queue-only ingress, server-host requirement, and fenced drain.** Incoming webhooks require
   server-hosted automations and the sync server as the workspace's active automation host;
   creating or resuming a webhook on a computer-hosted workspace fails with `409`, and servers

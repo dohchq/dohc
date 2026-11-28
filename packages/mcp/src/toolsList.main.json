@@ -482,7 +482,7 @@
     },
     {
       "name": "dohc_create_incoming_webhook",
-      "description": "Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.",
+      "description": "Create an incoming webhook for a private Collection in a synced workspace the person you work for owns. collection is the Collection's folder, relative to the workspace root. Returns the address once, as endpointUrl. It is a secret: anyone who has it can add records, so give it only to the person you work for or the site that posts to it. For an address that a public web page posts to, pass form.fields with the field names to keep, such as [\"email\", \"source\"]: it then takes only form posts, drops every other field, and allows each network a few posts a day. If you don't know whether a create worked, list incoming webhooks before you try again. Creating needs the server to run the workspace's automations (dohc_use_server_for_automations) with no handover waiting. The owner deletes or rotates it in Settings › Secrets › Incoming webhooks.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -493,6 +493,24 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 1024
+          },
+          "form": {
+            "type": "object",
+            "properties": {
+              "fields": {
+                "minItems": 1,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,39}$"
+                }
+              }
+            },
+            "required": [
+              "fields"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
