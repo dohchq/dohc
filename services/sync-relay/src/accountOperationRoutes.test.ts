@@ -4424,7 +4424,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       body: "Check @[docs/plan.md] and (a file not shared here)",
     });
 
-    // Idempotent retry with same operationId (even after display name changes) appends nothing.
     benName = "Benjamin";
     const retried = await answer(
       await h(
@@ -4448,7 +4447,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .rows.filter((row) => row.originId === memberOrigin),
     ).toHaveLength(2);
 
-    // Reusing the same operationId with different content is refused without writing.
     const conflict = await answer(
       await h(
         op(
@@ -4461,7 +4459,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     );
     expect(conflict).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
 
-    // Reply in reachable Group thread (including parentMessageId on posts lane).
     const replyRes = await answer(
       await h(
         op(
@@ -4490,11 +4487,9 @@ describe("a Member's phone reads in a workspace they joined", () => {
       body: "Booked @[docs/plan.md] (not (a file not shared here))",
     });
 
-    // Engine copies were never touched by Member writes.
     expect(engine.methods()).not.toContain("chats.startChannelThread");
     expect(engine.methods()).not.toContain("chats.sendMessage");
 
-    // groupsFull (with copies on) marks reachable Groups with per-Group read-write vs read-only access.
     const readable = await joinedChat();
     const chats = new ChatsLiveAdapter(readable.engine, "trip", { workspaceId: "trip" });
     const ro = await chats.createChannel({ workspaceId: "trip", name: "Announcements" });
@@ -4560,7 +4555,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
         .rows.filter((row) => row.originId === memberOrigin).length;
 
-    // Hidden Group, DM, General, nonexistent Group -> missing (no existence oracle).
     for (const groupId of ["wire-hidden", "wire-dm", GENERAL_CHANNEL_WIRE_ID, "wire-none"]) {
       expect(
         await answer(
@@ -4569,7 +4563,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
         groupId,
       ).toMatchObject({ ok: false, refusal: "missing" });
     }
-    // Hidden Group thread, file-comment thread, nonexistent thread -> missing.
     for (const threadId of ["thread-hidden", "thread-file", "thread-none"]) {
       expect(
         await answer(
@@ -4580,7 +4573,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
         threadId,
       ).toMatchObject({ ok: false, refusal: "missing" });
     }
-    // View-only Group -> refused.
     expect(
       await answer(
         await h(
@@ -4589,7 +4581,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       ),
     ).toEqual({ ok: false, refusal: "refused", reason: "Couldn't send" });
 
-    // Forged author fields and decision fields -> 400.
     for (const bad of [
       { operationId: "op-a1", groupId: planningWire, body: "hi", authorKind: "agent" },
       { operationId: "op-a2", groupId: planningWire, body: "hi", authorDisplayName: "Ana" },
@@ -4617,7 +4608,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       ).status,
     ).toBe(400);
 
-    // Mid-flight Show on phone off during lookup -> 404 and 0 rows written.
     const waitLookup = new Promise<void>((resolve) => {
       enteredLookup = resolve;
     });
@@ -4638,7 +4628,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     expect((await inflight).status).toBe(404);
     expect(countMemberRows()).toBe(0);
 
-    // Re-enable, then revoke mid-flight during lookup -> 404 and 0 rows written.
     expect(storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: true })).toBe(
       true,
     );
@@ -4667,7 +4656,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     expect((await revoking).status).toBe(404);
     expect(countMemberRows()).toBe(0);
 
-    // Transaction-guard races: re-invite Ben and flip Show on phone off (and file reach) right inside appendBrowserChatBatch.
     const raced = await joinedChat({ copies: false });
     const racedOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
     const realAppend = raced.storage.appendBrowserChatBatch.bind(raced.storage);
@@ -4822,7 +4810,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     const saved = first.result as { threadId: string; messageId: string };
     expect(countRows()).toBe(2);
 
-    // Restrict docs/ after save: identical retry must still return saved, not refused.
     expect(
       storage.changeFolderRule({
         workspaceId: "trip",
@@ -4857,7 +4844,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     });
     expect(countRows()).toBe(2);
 
-    // Downgrade Group to read-only (view): identical retry still returns saved; conflicting reuse refuses.
     storage.setWorkspaceGroupRule({
       workspaceId: "trip",
       channelWireId: planningWire,
@@ -4906,7 +4892,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       result: { ok: false, refusal: "refused", reason: "Couldn't send" },
     });
 
-    // Hide the Group: retry answers missing.
     storage.setWorkspaceGroupRule({
       workspaceId: "trip",
       channelWireId: planningWire,
@@ -4932,7 +4917,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       ),
     ).toMatchObject({ ok: true, result: { ok: false, refusal: "missing" } });
 
-    // Hide workspace on phone: retry answers 404.
     storage.setShowOnPhone({ userId: "ben", workspaceId: "trip", showOnPhone: false });
     expect(
       (
@@ -4982,7 +4966,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
     ).result as { threadId: string; messageId: string };
     const beforeReplies = countRows();
 
-    // Nonexistent parent
     const absent = await json(
       await h(
         op(
@@ -5007,7 +4990,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       },
     });
 
-    // Foreign thread parent (another visible thread)
     const foreign = await json(
       await h(
         op(
@@ -5028,7 +5010,6 @@ describe("a Member's phone reads in a workspace they joined", () => {
       result: { ok: false, refusal: "missing", reason: `chat message not found: ${p2.messageId}` },
     });
 
-    // Mid-flight parent deletion right inside appendBrowserChatBatch rolls back as missing.
     const realAppend = storage.appendBrowserChatBatch.bind(storage);
     const deleteParentSpy = vi
       .spyOn(storage, "appendBrowserChatBatch")
@@ -5067,8 +5048,7 @@ describe("a Member's phone reads in a workspace they joined", () => {
     expect(countRows()).toBe(beforeReplies);
   });
 
-  it("preserves authoritative file-thread bindings, pins grantId across re-invites, and keeps redacted titles and bodies within size limits", async () => {
-    // B1: a Group post whose derived thread ID collides with an existing file-comment thread must be refused.
+  it("refuses a Member Group post whose derived thread ID collides with an existing file-comment thread", async () => {
     const f1 = await joinedChat({ copies: false });
     const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
     const derivedThreadId = `browser-thread:${sha256Hex(
@@ -5116,8 +5096,9 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
         .rows.filter((row) => row.originId === memberOrigin),
     ).toHaveLength(0);
+  });
 
-    // B2: an in-flight write held across remove + re-invite with a new grantId must fail 404.
+  it("refuses an in-flight Member write when the Member is removed and let back in with a new grantId", async () => {
     let releaseLookup: (() => void) | undefined;
     let enteredLookup: (() => void) | undefined;
     const f2 = await joinedChat({
@@ -5132,6 +5113,7 @@ describe("a Member's phone reads in a workspace they joined", () => {
         return "Ben";
       },
     });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
     const waitReinvite = new Promise<void>((resolve) => {
       enteredLookup = resolve;
     });
@@ -5169,9 +5151,11 @@ describe("a Member's phone reads in a workspace they joined", () => {
         .fetchLogPage({ workspaceId: "trip", sinceRelaySeq: 0, limit: 100 })
         .rows.filter((row) => row.originId === memberOrigin),
     ).toHaveLength(0);
+  });
 
-    // B3: redaction that would expand a valid title past 200 units or body past 64 KiB uses compact placeholder
-    // only on withheld spans, preserving permitted links and user-typed placeholder text.
+  it("bounds redacted Member titles and bodies without altering permitted links or user-typed placeholder text", async () => {
+    const f1 = await joinedChat({ copies: false });
+    const memberOrigin = namedShareOrigin("share-trip", "ben", "browser-chat");
     const crowdedTitle = `${"@[private/a] ".repeat(9)}@[docs/plan.md#(a file not shared here)] (a file not shared here)`;
     expect(crowdedTitle.length).toBeLessThanOrEqual(200);
     const crowdedBody = `${"@[private/x] ".repeat(4_500)}done`;
