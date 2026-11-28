@@ -34,6 +34,7 @@ import {
   type LiveObjectBinding,
 } from "@dohc/live-session-contract/live-object-binding";
 import type { StorageContext } from "./context";
+import type { RetirementKey } from "./serviceActivationRetirement";
 import type { LiveHostConnectionCoordinate, StoredLiveDocumentAuthority } from "./types";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import {
@@ -752,10 +753,12 @@ export class LiveCommittedDeliveryStore {
     maxEvents: number;
     throughCursor?: number;
     actor?: import("./types").CurrentLiveBindingRequest["actor"];
+    retirement?: RetirementKey;
   }): OwnerCutCapture {
     const host = snapshotHostCoordinate(input.host),
       document = journalDocument(input.document);
     const adoptionId = parseLiveUpdateIdentifier(input.adoptionId, "adoption ID");
+    integrity(input.retirement === undefined || input.retirement.activationId === adoptionId);
     const sequence = authorityInteger(input.expectedLocalSequence),
       maxBytes = authorityInteger(input.maxBytes, 1),
       maxEvents = authorityInteger(input.maxEvents, 1);
@@ -763,7 +766,7 @@ export class LiveCommittedDeliveryStore {
       input.throughCursor === undefined ? undefined : authorityInteger(input.throughCursor);
     const captured = this.#storage.readTx(() => {
       this.#standing(host);
-      const result = liveJournalCut(this.#storage, document);
+      const result = liveJournalCut(this.#storage, document, input.retirement);
       if (result.kind !== "cut") throw new Error(`Owner adoption ${result.reason}.`);
       const authority = result.cut.authorityHistory.find((row) => row.current)!;
       const authorized = input.actor

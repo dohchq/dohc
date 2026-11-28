@@ -1014,6 +1014,7 @@ export class ServiceActivationDriver {
         ]);
         const cut = this.#delivery.captureOwnerCut({
           ...input,
+          retirement: key,
           expectedLocalSequence: authorityInteger(adoption.localYDocSequence),
           maxBytes: o.adoption.maxBytes,
           maxEvents: o.adoption.maxEvents,

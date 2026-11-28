@@ -1,6 +1,7 @@
 import { registerTypingCheckpoint } from "./outageTypingRecovery";
 import { SharedDocumentWaitingError } from "../ipc/sharedDocumentOpenState";
 import { engineSaveState } from "./engineYDocSaveState";
+import { holdsRoom } from "./ownerLivePause";
 import {
   DaemonRefusalError,
   YdocOwnerDraftPendingError,
@@ -162,7 +163,10 @@ interface TestHarnessOptions {
   ownerDraftState?: Parameters<typeof createEngineYDocSessionIpc>[0]["ownerDraftState"];
   onPendingShareMayChange?: (workspaceId: string) => void;
   onOwnerOpened?: (workspaceId: string, path: string) => void;
-  livePaused?: (workspaceId: string, objectId: string) => boolean;
+  livePaused?: (
+    workspaceId: string,
+    binding: { readonly objectId: string; readonly lineageClaimId: string },
+  ) => boolean;
 }
 
 function rendererSession(
@@ -319,12 +323,19 @@ describe("engine Y.Doc IPC adapter", () => {
     }
   });
 
-  it("asks the editor to gather typing only while the server has paused the note", async () => {
-    const pausedObjects = new Set(["object-paused"]);
-    for (const objectId of ["object-paused", "object-other"]) {
-      const h = harness(providerSession({ objectId }), {
-        livePaused: (workspaceId, id) =>
-          workspaceId === openPayload.workspaceId && pausedObjects.has(id),
+  it.each([
+    ["object-paused", "a".repeat(64), true],
+    ["object-paused", "b".repeat(64), false],
+    ["object-other", "a".repeat(64), false],
+  ])(
+    "gathers typing on %s with claim %s only while the server pauses its room",
+    async (objectId, lineageClaimId, gathers) => {
+      const pauses = [
+        { objectId: "object-paused", lineageClaimId: "a".repeat(64), cause: "refused" as const },
+      ];
+      const h = harness(providerSession({ objectId, lineageClaimId }), {
+        livePaused: (workspaceId, binding) =>
+          workspaceId === openPayload.workspaceId && holdsRoom(pauses, binding),
       });
       try {
         const sender = new FakeSender(7);
@@ -337,19 +348,15 @@ describe("engine Y.Doc IPC adapter", () => {
             lineageGeneration: 1,
             requestId: "11111111-1111-4111-8111-111111111111",
           }),
-        ).toEqual(
-          objectId === "object-paused"
-            ? { accepted: true, batchDelayMs: 1_000 }
-            : { accepted: true },
-        );
+        ).toEqual(gathers ? { accepted: true, batchDelayMs: 1_000 } : { accepted: true });
         expect(vi.mocked(h.session.applyLocalUpdate).mock.calls[0]?.[2]?.settleDelayMs).toBe(
-          objectId === "object-paused" ? 2_000 : undefined,
+          gathers ? 2_000 : undefined,
         );
       } finally {
         await h.ipc.shutdown();
       }
-    }
-  });
+    },
+  );
 
   it("sends a definitive edit refusal through the scoped save event", async () => {
     const h = harness(providerSession());

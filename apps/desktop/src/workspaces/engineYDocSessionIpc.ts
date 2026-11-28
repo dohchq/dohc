@@ -187,7 +187,10 @@ interface EngineYDocSessionIpcOptions {
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
   /** The server has paused live editing of this note until its owner resumes it. */
-  livePaused?: (workspaceId: string, objectId: string) => boolean;
+  livePaused?: (
+    workspaceId: string,
+    binding: { readonly objectId: string; readonly lineageClaimId: string },
+  ) => boolean;
   /** The owner opened a document of their own workspace in an editor here, not a shared view's, that the engine holds an owner binding for. */
   onOwnerOpened?: (workspaceId: string, path: string) => void;
   // An owner's edit of a shared note is in its queue for the server.
@@ -1198,11 +1201,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           this.#localPersonId,
         );
         const sharedView = this.#isSharedView(owned.workspace);
-        const objectId = owned.provider.objectId;
+        const { objectId, lineageClaimId } = owned.provider;
         const paused =
           !sharedView &&
           objectId !== undefined &&
-          this.#livePaused?.(owned.workspace.workspaceId, objectId) === true;
+          lineageClaimId != null &&
+          this.#livePaused?.(owned.workspace.workspaceId, { objectId, lineageClaimId }) === true;
         try {
           owned.provider.applyLocalUpdate(
             input.update,

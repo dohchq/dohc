@@ -35,6 +35,65 @@ pub(crate) use released::{
     validate_redundant_recoveries,
 };
 
+const RECOVERY_MOMENT_PREFIX: &str = "ydoc-recovery-moment-";
+const INACTIVE_RECOVERY_MOMENT_PREFIX: &str = "ydoc-inactive-recovery-";
+
+pub(crate) fn same_recovery_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    creation: &ReceivedCreation<'_>,
+    before_blob_sha256: Option<&str>,
+) -> Result<bool, SyncError> {
+    let continuation = creation
+        .moment_id
+        .starts_with(INACTIVE_RECOVERY_MOMENT_PREFIX);
+    let before = match (continuation, creation.before_present, before_blob_sha256) {
+        (false, "absent" | "null", _) => None,
+        (true, "present", Some(before)) => Some(before),
+        _ => return Ok(false),
+    };
+    let Some(correlation_id) = creation.correlation_id else {
+        return Ok(false);
+    };
+    if !(continuation || creation.moment_id.starts_with(RECOVERY_MOMENT_PREFIX))
+        || creation.operation != "write"
+        || !matches!(creation.after_content_kind, None | Some("text"))
+    {
+        return Ok(false);
+    }
+    let stored: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT blob.byte_length,blob.text FROM moments AS moment
+               JOIN blobs AS blob ON blob.sha256=moment.after_blob_sha256
+              WHERE moment.workspace_id=?1 AND moment.moment_id=?2 AND moment.version_id=?3
+                AND moment.object_id=?4 AND moment.operation='write'
+                AND moment.after_content_kind='text' AND moment.after_blob_sha256=?5
+                AND moment.metadata_correlation_id=?6
+                AND moment.before_blob_sha256 IS ?7
+                AND (moment.before_present=2)=?8",
+            params![
+                workspace_id,
+                creation.moment_id,
+                creation.version_id,
+                creation.object_id,
+                creation.after_blob_sha256,
+                correlation_id,
+                before,
+                continuation,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    Ok(stored.is_some_and(|(length, text)| {
+        creation
+            .after_byte_length
+            .is_none_or(|incoming| incoming == length)
+            && i64::try_from(text.len()).is_ok_and(|actual| actual == length)
+            && dohc_engine_storage::hex_sha256(text.as_bytes()) == creation.after_blob_sha256
+    }))
+}
+
 const MAX_RECOVERED_NAME_BYTES: usize = 255;
 const MAX_RECOVERED_NAME_UTF16_UNITS: usize = 255;
 const LOCAL_RECOVERY_CORRELATION_PREFIX: &str = "ydoc-local-recovery:v1:";
@@ -241,7 +300,7 @@ fn recovery_identity(
     let digest = dohc_engine_storage::hex_sha256(input.as_bytes());
     RecoveryIdentity {
         object_id: format!("ydoc-recovery-object-{digest}"),
-        moment_id: format!("ydoc-recovery-moment-{digest}"),
+        moment_id: format!("{RECOVERY_MOMENT_PREFIX}{digest}"),
         summary: recovery_summary(cause, original_path),
         correlation_id: format!("ydoc-recovery:v1:{losing_claim_id}"),
     }
@@ -1084,7 +1143,7 @@ pub(crate) fn recover_inactive_projection_in_tx(
             object_id,
             path: path.clone(),
             text: content.to_owned(),
-            moment_id: format!("ydoc-inactive-recovery-{moment}"),
+            moment_id: format!("{INACTIVE_RECOVERY_MOMENT_PREFIX}{moment}"),
             metadata_origin: "sync".to_owned(),
             metadata_summary: Some(recovery_summary(
                 RecoveryCause::RelayArbitration,
@@ -1448,6 +1507,47 @@ fn pending_local_recoveries(
                 Ok(YdocRecoveryMaterialization {
                     materialization_job_id: row.get(0)?,
                     path: row.get(1)?,
+                })
+            })
+            .map_err(SyncError::corrupt)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)
+    })
+}
+
+pub(crate) fn pending_inactive_recoveries(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+    store.read_with(|conn| {
+        let mut statement = conn
+            .prepare(
+                "SELECT moment.version_id, moment.path
+                   FROM materialization_jobs AS job
+                   JOIN moments AS moment
+                     ON moment.workspace_id=?1
+                    AND moment.moment_id=substr(job.job_id, length('sync-mat_')+1)
+                   JOIN snapshots AS snapshot
+                     ON snapshot.workspace_id=moment.workspace_id
+                    AND snapshot.version_id=moment.version_id
+                    AND snapshot.object_id=moment.object_id
+                    AND snapshot.path=moment.path
+                    AND snapshot.latest_moment_id=moment.moment_id
+                  WHERE job.status='pending'
+                    AND job.workspace_id=?1
+                    AND job.operation='write'
+                    AND job.job_id GLOB 'sync-mat_*'
+                    AND moment.metadata_correlation_id GLOB 'ydoc-inactive-recovery:*'
+                  ORDER BY job.target_generation",
+            )
+            .map_err(SyncError::corrupt)?;
+        let rows = statement
+            .query_map([workspace_id], |row| {
+                Ok(MomentMaterializationChange {
+                    version_id: row.get(0)?,
+                    path: row.get(1)?,
+                    operation: "write",
+                    content_kind: "text",
                 })
             })
             .map_err(SyncError::corrupt)?;

@@ -1744,7 +1744,8 @@ fn replay_materializations(
 /// Which queued writes at a path its head supersedes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SupersededWrites {
-    /// The writes Y.Doc projections queued, `ydoc-mat_…`.
+    /// The writes Y.Doc projections queued, `ydoc-mat_…`, and the writes of
+    /// their recovered copies.
     Projections,
     /// Every queued write, for a document that left a hosted scope: its file
     /// goes next.
@@ -1801,7 +1802,9 @@ pub(super) fn end_superseded_writes(
                 "SELECT job_id, content_sha256=?3 FROM materialization_jobs \
                  WHERE status='pending' AND operation='write' AND target_path=?2 \
                    AND (workspace_id=?1 OR workspace_id='') \
-                   AND (?4=0 OR job_id GLOB 'ydoc-mat_*')",
+                   AND (?4=0 OR job_id GLOB 'ydoc-mat_*' \
+                     OR job_id GLOB 'sync-mat_ydoc-recovery-moment-*' \
+                     OR job_id GLOB 'sync-mat_ydoc-inactive-recovery-*')",
             )
             .map_err(StorageError::corrupt_public)?;
         let pending = statement
@@ -1830,7 +1833,10 @@ pub(super) fn end_superseded_writes(
             "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=?5 \
              WHERE status='pending' AND operation='write' AND target_path=?2 \
                AND (workspace_id=?1 OR workspace_id='') \
-               AND (?4=0 OR job_id GLOB 'ydoc-mat_*') AND content_sha256<>?3",
+               AND (?4=0 OR job_id GLOB 'ydoc-mat_*' \
+                 OR job_id GLOB 'sync-mat_ydoc-recovery-moment-*' \
+                 OR job_id GLOB 'sync-mat_ydoc-inactive-recovery-*') \
+               AND content_sha256<>?3",
             params![workspace_id, path, head_sha256, projections, now_ms],
         )
         .map_err(StorageError::persist_public)

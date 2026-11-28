@@ -4156,6 +4156,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for change in drained.extras.changes {
             insert_changed_path(&mut pass.changed_paths, change);
         }
+        for change in
+            crate::ydoc_recovery::pending_inactive_recoveries(store, workspace_id).map_err(local)?
+        {
+            insert_changed_path(&mut pass.changed_paths, change);
+        }
         for declined in drained.extras.sharing_declined {
             push_sharing_declined_once(&mut pass.sharing_declined, declined);
         }

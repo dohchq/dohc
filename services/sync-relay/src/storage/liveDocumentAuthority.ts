@@ -10,11 +10,13 @@ import { ownedPersonalReachIn, readPersonalAuthority } from "./personalAgents";
 import {
   ordinaryActivationBaseline,
   ordinaryActivationBasisCharge,
+  ordinaryActivationResolves,
   persistOrdinaryActivationBasis,
   ServiceActivationLineageEnding,
   type VerifiedOrdinaryActivationCut,
 } from "./ordinaryActivationSource";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { openServiceActivationRetirement } from "./serviceActivationRetirement";
 import { LIVE_ROOM_EDITS } from "./liveRoomEdits";
 import { LIVE_ROOM_PAUSES } from "./liveRoomPauses";
 import { beginsLineage, readOrdinaryActivationBasis } from "./ordinaryActivationBasis";
@@ -1512,14 +1514,24 @@ function registerValidatedBaseline(
       .all(document.workspaceId, document.mainVersionId, document.objectId)
       .map((row) => decodeLiveDocumentAuthority(storage.db, document, row));
     const current = history.find((row) => row.current);
+    const resolved =
+      !!ordinaryCut &&
+      !!current &&
+      !current.open &&
+      ordinaryActivationResolves(storage, ordinaryCut, {
+        lineageClaimId: current.binding.lineageClaimId,
+        baselineSequence: current.baselineSequence,
+      });
     const replaces =
       ordinaryCut &&
       current &&
+      (current.open || resolved) &&
       !history.some((row) => row.binding.lineageClaimId === document.lineageClaimId)
         ? current.binding.lineageClaimId
         : null;
     if (replaces !== null) {
-      if (lastLineageEnding(storage, document)) throw new ServiceActivationLineageEnding();
+      if (lastLineageEnding(storage, document, resolved ? replaces : null))
+        throw new ServiceActivationLineageEnding();
       storage.db
         .prepare(`UPDATE sync_relay_live_documents SET lineage_state='retired',admission_state='closed',retired_at_ms=?
           WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'`)
@@ -1632,13 +1644,25 @@ function registerValidatedBaseline(
   });
 }
 
+const roomEndings = (lineage: string) =>
+  `SELECT 'room-edits' AS kind,object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${lineage}
+    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${lineage}`;
 const lineageEndings = (oneObject: boolean, forRead = false) => {
   const object = oneObject ? " AND object_id=?" : "";
   return `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=?${object} AND retired_at_ms IS NULL
-    UNION ALL SELECT 'room-edits',object_id FROM ${LIVE_ROOM_EDITS} WHERE workspace_id=? AND main_version_id=?${object}
-    UNION ALL SELECT 'pause',object_id FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND main_version_id=?${object}
+    UNION ALL ${roomEndings(object)}
     UNION ALL SELECT 'enrolment',object_id FROM ${SERVICE_HOST_ENROLLMENTS} WHERE workspace_id=?${object} AND ${forRead ? "(state<>'off' OR host_drained_at_ms IS NULL)" : "state<>'starting'"}`;
 };
+const unretiredRoom = (kind: string, table: string) =>
+  `SELECT '${kind}',object_id FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id<>?
+    AND NOT EXISTS(SELECT 1 FROM sync_relay_live_documents d WHERE d.workspace_id=${table}.workspace_id
+      AND d.main_version_id=${table}.main_version_id AND d.object_id=${table}.object_id
+      AND d.lineage_claim_id=${table}.lineage_claim_id AND d.lineage_state='retired')`;
+const resolvedLineageEndings =
+  () => `SELECT 'activation' AS kind,object_id FROM ${SERVICE_ACTIVATIONS}
+    WHERE workspace_id=? AND main_version_id=? AND object_id=? AND retired_at_ms IS NULL
+  UNION ALL ${unretiredRoom("room-edits", LIVE_ROOM_EDITS)}
+  UNION ALL ${unretiredRoom("pause", LIVE_ROOM_PAUSES)}`;
 
 export type RelayLiveNoteKind = "activation" | "room-edits" | "pause" | "enrolment" | "session";
 export type RelayLiveNote = { objectId: string; kinds: RelayLiveNoteKind[] };
@@ -1674,25 +1698,42 @@ export function relayLiveNotes(
   return [...notes.values()];
 }
 
-function lastLineageEnding(storage: StorageContext, document: LiveDocumentKey): boolean {
+function lastLineageEnding(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  resolvedClaim: string | null,
+): boolean {
   const { workspaceId, mainVersionId, objectId } = document;
-  return (
-    storage.db
-      .prepare(`${lineageEndings(true)} LIMIT 1`)
-      .get(
-        workspaceId,
-        mainVersionId,
-        objectId,
-        workspaceId,
-        mainVersionId,
-        objectId,
-        workspaceId,
-        mainVersionId,
-        objectId,
-        workspaceId,
-        objectId,
-      ) !== undefined
-  );
+  const object = [workspaceId, mainVersionId, objectId];
+  const ending =
+    resolvedClaim === null
+      ? storage.db
+          .prepare(`${lineageEndings(true)} LIMIT 1`)
+          .get(...object, ...object, ...object, workspaceId, objectId)
+      : storage.db
+          .prepare(`${resolvedLineageEndings()} LIMIT 1`)
+          .get(...object, ...object, resolvedClaim, ...object, resolvedClaim);
+  return ending !== undefined;
+}
+
+export function closeResolvedLineage(
+  storage: StorageContext,
+  predecessor: LiveDocumentKey,
+  nowMs: number,
+): void {
+  const where = `workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current'`;
+  const key = [
+    predecessor.workspaceId,
+    predecessor.mainVersionId,
+    predecessor.objectId,
+    predecessor.lineageClaimId,
+  ];
+  if (!storage.db.prepare(`SELECT 1 FROM sync_relay_live_documents WHERE ${where}`).get(...key))
+    return;
+  openServiceActivationRetirement(storage, predecessor, nowMs);
+  storage.db
+    .prepare(`UPDATE sync_relay_live_documents SET admission_state='closed' WHERE ${where}`)
+    .run(...key);
 }
 
 export function currentLiveDocumentMoment(

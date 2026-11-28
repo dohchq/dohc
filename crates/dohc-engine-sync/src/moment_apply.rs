@@ -760,6 +760,18 @@ fn apply_moment_append(
                 record_facts: None,
             });
         }
+        if crate::ydoc_recovery::same_recovery_in_tx(
+            tx,
+            &envelope.workspace_id,
+            &creation,
+            payload.before_blob_sha256.as_deref(),
+        )? {
+            return Ok(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: Vec::new(),
+                record_facts: None,
+            });
+        }
         return Err(SyncError::InvalidInput {
             reason: "replicated plaintext moment id collides with existing history",
         });
@@ -875,6 +887,8 @@ fn apply_moment_append(
                 record_facts: None,
             });
         }
+        tx.execute_batch("SAVEPOINT moment_resulting_head")
+            .map_err(SyncError::persist)?;
     }
 
     if mode.ordinary()
@@ -1207,7 +1221,7 @@ fn apply_moment_append(
                 MomentBefore::Present(Box::new(snapshot.clone()))
             })
         } else {
-            remote_before
+            remote_before.clone()
         };
         ensure_file_object(tx, &envelope.workspace_id, payload)?;
         insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
@@ -1375,7 +1389,22 @@ fn apply_moment_append(
                             reason: "ydoc-resulting-head-pending",
                         },
                     ) => {
-                        return Err(protected.map_or(pending, SyncError::ReleasedLineageUnsettled));
+                        if !saved_on_replaced_claim(tx, envelope, payload)? {
+                            return Err(
+                                protected.map_or(pending, SyncError::ReleasedLineageUnsettled)
+                            );
+                        }
+                        tx.execute_batch(
+                            "ROLLBACK TO moment_resulting_head; RELEASE moment_resulting_head",
+                        )
+                        .map_err(SyncError::persist)?;
+                        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+                        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+                        return Ok(MomentApplyResult {
+                            conflicts_opened: 0,
+                            materialization_changes: Vec::new(),
+                            record_facts: None,
+                        });
                     }
                     reconciled => reconciled?,
                 }
@@ -1901,6 +1930,90 @@ fn holds_earlier_lineage_artifact(
         }
     }
     Ok(false)
+}
+
+fn saved_on_replaced_claim(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    if !is_ydoc_settlement_moment_id(&payload.moment_id)
+        || payload.operation != "write"
+        || payload.path != payload.payload_after_path
+        || ContentKind::from_wire(payload.payload_after_content_kind.as_deref())
+            != ContentKind::Text
+    {
+        return Ok(false);
+    }
+    let replaced = |claim: &str| -> Result<bool, SyncError> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_inactive_lineages i JOIN ydoc_docs d \
+               ON d.workspace_id=i.workspace_id AND d.version_id=i.version_id AND d.object_id=i.object_id \
+               AND d.lineage_claim_status='exact' AND d.lineage_claim_id<>i.lineage_claim_id \
+             WHERE i.workspace_id=?1 AND i.version_id=?2 AND i.object_id=?3 AND i.lineage_claim_id=?4)",
+            params![envelope.workspace_id, payload.version_id, payload.object_id, claim],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    };
+    if let Some(claim) =
+        envelope.payload["settlementReference"]["record"]["binding"]["lineageClaimId"].as_str()
+    {
+        return replaced(claim);
+    }
+    if payload.moment_id.starts_with("moment-ydoc-apply-") {
+        let key = DocKey::new(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.object_id,
+        )
+        .map_err(|_| SyncError::CoordinateDiverged)?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT origin_id,origin_seq,json_extract(payload_json,'$.path'), \
+                 json_extract(payload_json,'$.lineageClaimId') FROM replication_log \
+                 WHERE workspace_id=?1 AND op_kind='ydoc.update' AND apply_disposition='applied' \
+                   AND json_extract(payload_json,'$.versionId')=?2 AND json_extract(payload_json,'$.objectId')=?3",
+            )
+            .map_err(SyncError::corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![envelope.workspace_id, payload.version_id, payload.object_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .map_err(SyncError::corrupt)?;
+        for row in rows {
+            let (origin, seq, path, claim) = row.map_err(SyncError::corrupt)?;
+            if crate::ydoc_apply::ydoc_apply_moment_id(&key, &path, &origin, seq)
+                == payload.moment_id
+            {
+                return replaced(&claim);
+            }
+        }
+        return Ok(false);
+    }
+    let claim: Option<String> = tx
+        .query_row(
+            "SELECT json_extract(payload_json,'$.lineageClaimId') FROM replication_log \
+             WHERE workspace_id=?1 AND origin_id=?2 AND apply_disposition='applied' AND origin_seq=(\
+               SELECT MAX(origin_seq) FROM replication_log INDEXED BY replication_ydoc_origin_document \
+               WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq<?5 AND op_kind='ydoc.update' \
+                 AND json_extract(payload_json,'$.versionId')=?3 AND json_extract(payload_json,'$.objectId')=?4)",
+            params![envelope.workspace_id, envelope.origin_id, payload.version_id, payload.object_id,
+                envelope.origin_seq],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .flatten();
+    claim.map_or(Ok(false), |claim| replaced(&claim))
 }
 
 fn origin_settled_on_held_claim(

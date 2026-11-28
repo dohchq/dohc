@@ -23,6 +23,7 @@ export interface RelayLivePause {
 export interface OwnerLivePause {
   readonly pauseId: string;
   readonly objectId: string;
+  readonly lineageClaimId: string;
   readonly path: string;
   /** "ended" when the note's file was moved, deleted or replaced, or its lineage ended. */
   readonly cause: "refused" | "failing" | "ended";
@@ -38,8 +39,20 @@ export interface OwnerLivePause {
  * The relay holds this note's edits until its owner resumes it, so each row
  * recorded meanwhile becomes a delivery at Resume. An ended pause holds none.
  */
-export function holdsDeliveries(pauses: readonly OwnerLivePause[], objectId: string): boolean {
+type HeldPause = Pick<OwnerLivePause, "objectId" | "lineageClaimId" | "cause">;
+
+export function holdsDeliveries(pauses: readonly HeldPause[], objectId: string): boolean {
   return pauses.some((pause) => pause.objectId === objectId && pause.cause !== "ended");
+}
+
+export function holdsRoom(
+  pauses: readonly HeldPause[],
+  binding: { readonly objectId: string; readonly lineageClaimId: string },
+): boolean {
+  return holdsDeliveries(
+    pauses.filter((pause) => pause.lineageClaimId === binding.lineageClaimId),
+    binding.objectId,
+  );
 }
 
 export interface OwnerLivePauseRelay {
@@ -52,6 +65,9 @@ export interface OwnerLivePauseWrites {
   /** Writes a new file and returns its path. */
   create(path: string, text: string): Promise<string>;
 }
+
+const causeOf = (pause: RelayLivePause): OwnerLivePause["cause"] =>
+  pause.refusal === "stale-binding" ? "ended" : pause.cause;
 
 const MAX_NAME_ATTEMPTS = 100;
 
@@ -246,8 +262,9 @@ export async function settleOwnerLivePauses(input: {
       settled.push({
         pauseId: pause.pauseId,
         objectId: pause.objectId,
+        lineageClaimId: pause.lineageClaimId,
         path: pause.path,
-        cause: pause.refusal === "stale-binding" ? "ended" : pause.cause,
+        cause: causeOf(pause),
         names: authorNames(pause.named),
         copyPath: copy?.copyPath ?? null,
         leftOut: copy?.leftOut ?? false,
@@ -261,9 +278,14 @@ export async function settleOwnerLivePauses(input: {
   // short here, leaves this computer's Stop behind. Its copy goes on disk,
   // then clearing it lets the note join its room again.
   const paused = new Set(input.pauses.map((pause) => pause.objectId));
+  const holding = input.pauses.map((pause) => ({ ...pause, cause: causeOf(pause) }));
   try {
     for (const stop of await input.client.ownerYDocStopList(request(), input.signal)) {
-      if (!stop.paused || paused.has(stop.document.objectId)) continue;
+      if (
+        !stop.paused ||
+        (stop.binding ? holdsRoom(holding, stop.binding) : paused.has(stop.document.objectId))
+      )
+        continue;
       if (!stop.paused.copyWritten) {
         const held = await input.client.ownerYDocPausedCopy(request(), stop.document, input.signal);
         if (held && !held.stop.paused.copyWritten) await writeHeld(held, stop.document.currentPath);

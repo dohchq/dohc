@@ -11,6 +11,7 @@ async function ownerPasses(
   }
 }
 
+import type { RelayLivePause } from "./ownerLivePause";
 import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES } from "@dohc/live-session-contract/live-frame";
 import { resolve } from "node:path";
 import { mkdirSync } from "node:fs";
@@ -360,6 +361,7 @@ async function quarantinedOwner(
     assertCurrent?: () => void;
     onConnect?: () => void;
     rows?: () => unknown[];
+    pauses?: RelayLivePause[];
   } = {},
 ) {
   const f = fixture(),
@@ -420,6 +422,7 @@ async function quarantinedOwner(
         keptEdits: server.keptEdits ?? unexpectedKeptEdits,
         keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
         ...noLivePauses,
+        livePauses: async () => server.pauses ?? [],
         open: server.open ?? unexpectedOpen,
         documents: async (_signal, fresh) => {
           const answer = {
@@ -1666,6 +1669,62 @@ describe("server owner peer lifecycle", () => {
         f.engine.retryOwnerDelivery("owner");
         expect(f.engine.ownerLivePausedPaths("owner")).toEqual([]);
       });
+    } finally {
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
+  it("delivers a note whose pause ended or holds a claim it replaced, and holds one paused on its claim", async () => {
+    const pause = (objectId: string, lineageClaimId: string, refusal: string): RelayLivePause => ({
+      pauseId: `pause-${objectId}`,
+      objectId,
+      lineageClaimId,
+      savedCursor: 0,
+      path: `notes/${objectId}.md`,
+      cause: "refused",
+      refusal,
+      named: [],
+      copy: null,
+    });
+    const { f, credentials } = await quarantinedOwner(
+      [
+        { path: "notes/ended.md", objectId: "ended" },
+        { path: "notes/replaced.md", objectId: "replaced" },
+        { path: "notes/held.md", objectId: "held" },
+      ],
+      {
+        pauses: [
+          pause("ended", "a".repeat(64), "stale-binding"),
+          pause("replaced", "b".repeat(64), "capacity-refused"),
+          pause("held", "a".repeat(64), "capacity-refused"),
+        ],
+      },
+    );
+    quarantineMock.read.mockResolvedValue([]);
+    Object.assign(f.client, {
+      ownerYDocPausedCopy: async () => null,
+      ownerYDocStopList: async () => [],
+    });
+    ownerDeliveryMock.pass.mockResolvedValue("empty");
+    const delivered = (from: number) =>
+      new Set(
+        ownerDeliveryMock.pass.mock.calls
+          .slice(from)
+          .map(([options]) => options.document.binding.objectId as string),
+      );
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(f.engine.ownerLivePauses("owner")).toHaveLength(3));
+      const from = ownerDeliveryMock.pass.mock.calls.length;
+      await vi.waitFor(() => {
+        f.engine.retryOwnerDelivery("owner");
+        expect(delivered(from)).toContain("ended");
+        expect(delivered(from)).toContain("replaced");
+      });
+      expect(delivered(from)).not.toContain("held");
     } finally {
       credentials.abort();
       await f.close();

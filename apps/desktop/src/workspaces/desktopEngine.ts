@@ -7,7 +7,12 @@ import {
   type OwnerStopRetirementTarget,
 } from "./ownerLiveStop";
 import { waitForEnginePublicationGate } from "./testEnginePublicationGate";
-import { settleOwnerLivePauses, type OwnerLivePause, type RelayLivePause } from "./ownerLivePause";
+import {
+  holdsRoom,
+  settleOwnerLivePauses,
+  type OwnerLivePause,
+  type RelayLivePause,
+} from "./ownerLivePause";
 import type { App, Dialog } from "electron";
 import {
   EngineWorkspaceSessions,
@@ -350,8 +355,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
   const ownerLivePauseResumes = new Map<string, number>();
   // A note the server paused takes no room and no delivery turn until its owner resumes it.
   const withoutServerPauses = (workspaceId: string, documents: ListedOwnerDeliveryDocument[]) => {
-    const paused = new Set((ownerLivePauses.get(workspaceId) ?? []).map((row) => row.objectId));
-    return documents.filter((document) => !paused.has(document.binding.objectId));
+    const pauses = ownerLivePauses.get(workspaceId) ?? [];
+    return documents.filter((document) => !holdsRoom(pauses, document.binding));
   };
   // The ready documents from each workspace's last complete live-host list, for the move guard.
   const liveDocumentPaths = new Map<string, LiveDocumentPath[]>();

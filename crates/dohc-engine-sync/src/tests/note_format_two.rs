@@ -1939,3 +1939,145 @@ fn a_storage_failure_reading_the_file_proof_stops_the_pass() {
     assert!(matches!(stopped, Err(SyncError::Storage(_))), "{stopped:?}");
     assert_eq!(head(&store, &key), (1, 0));
 }
+
+const STALE: &str = "Typed on the old note.\n";
+
+fn converted_peer(base: &[u8]) -> (ScratchDir, EngineStore, DocKey, serde_json::Value) {
+    let (scratch, _path, mut store) = open_store();
+    seed_identity(&mut store);
+    let key = seed_note(&mut store, NOTE, "moment-current", Some(base));
+    assert_eq!(
+        on(|| convert(&mut store, &key, &NoLiveLeases)),
+        FormatTwoConversion::Converted
+    );
+    let carrier = carriers(&store).pop().unwrap();
+    (scratch, store, key, carrier)
+}
+
+fn typed_on_replaced(
+    store: &EngineStore,
+    base: &[u8],
+    carrier: &serde_json::Value,
+    origin: &str,
+) -> ReplicationEnvelope {
+    let typed = on(|| {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(base).unwrap();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, STALE)
+            .unwrap()
+    });
+    envelope(
+        origin,
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main", "objectId": "object-a", "path": "doc.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": store.put_binary_blob(&typed).unwrap(),
+            "lineageClaimId": predecessor_claim(carrier), "isBaseState": false
+        }),
+    )
+}
+
+fn saved_as(
+    store: &mut EngineStore,
+    origin: &str,
+    moment_id: &str,
+    text: &str,
+) -> ReplicationEnvelope {
+    let (before, before_at, before_moment): (String, i64, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256,updated_at_ms,latest_moment_id FROM snapshots \
+                 WHERE object_id='object-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .unwrap();
+    let after = put_text(store, text);
+    envelope(
+        origin,
+        1,
+        "moment.append",
+        json!({
+            "momentId": moment_id, "versionId": "main", "objectId": "object-a",
+            "objectCreatedAtMs": 1, "path": "doc.md", "recordedAtMs": 2_000,
+            "operation": "write",
+            "payloadBeforeBlobSha256": before, "payloadBeforePath": "doc.md",
+            "payloadAfterBlobSha256": after, "payloadAfterPath": "doc.md",
+            "metadata": {"origin": "sync"},
+            "beforePresent": "present", "beforeObjectId": "object-a", "beforeVersionId": "main",
+            "beforePath": "doc.md", "beforeBlobSha256": before, "beforeContentKind": "text",
+            "beforeUpdatedAtMs": before_at, "beforeLatestMomentId": before_moment,
+            "beforeMetadata": {"origin": "sync"}
+        }),
+    )
+}
+
+fn recorded(store: &EngineStore, moment_id: &str) -> bool {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE moment_id=?1)",
+                [moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_save_typed_on_the_replaced_claim_is_history_and_the_owner_pulls_on() {
+    let base = base_of(&[NOTE]);
+    let (_scratch, mut store, key, carrier) = converted_peer(&base);
+    let typed = typed_on_replaced(&store, &base, &carrier, "joiner");
+    let saved = format!("moment-ydoc-{}", "c".repeat(64));
+    let save = saved_as(&mut store, "joiner", &saved, STALE);
+    let outcome = pull(&relay(vec![typed, save]), &mut store, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(2), "{outcome:?}");
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "joiner").unwrap(),
+        1
+    );
+    assert_eq!(claim(&store, &key), Some(successor_claim(&carrier)));
+    assert_eq!(note(&store, &key), (2, NOTE.to_owned()));
+    assert_eq!(text(&mut store), NOTE);
+    assert!(recorded(&store, &saved));
+    let recovered: Vec<String> = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT b.text FROM snapshots s JOIN blobs b ON b.sha256=s.blob_sha256 \
+                 WHERE s.metadata_correlation_id GLOB 'ydoc-inactive-recovery:*'",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()
+        })
+        .unwrap();
+    assert_eq!(recovered, vec![STALE.to_owned()]);
+}
+
+#[test]
+fn a_save_of_a_successor_edit_by_a_device_that_typed_on_the_replaced_claim_is_not_buried() {
+    let base = base_of(&[NOTE]);
+    let (_scratch, mut store, key, carrier) = converted_peer(&base);
+    let typed = typed_on_replaced(&store, &base, &carrier, "settler");
+    let outcome = pull(&relay(vec![typed]), &mut store, &NoLiveLeases);
+    assert_eq!(pending_cursor(&outcome), Some(1), "{outcome:?}");
+    let saved = crate::ydoc_apply::ydoc_apply_moment_id(&key, "doc.md", "peer", 0);
+    let save = saved_as(&mut store, "settler", &saved, "A peer's edit.\n");
+    let waits = on(|| {
+        crate::moment_apply::apply_moment_envelope(
+            &mut store,
+            &save,
+            &NoFaults,
+            &crate::ydoc_apply::AlwaysLive,
+            &dohc_engine_collab::live_update_application::ReleasedTails::default(),
+        )
+    });
+    assert!(
+        matches!(waits, Err(SyncError::RetryableState { .. })),
+        "{waits:?}"
+    );
+    assert!(!recorded(&store, &saved));
+}

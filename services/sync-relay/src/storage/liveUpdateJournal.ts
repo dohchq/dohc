@@ -61,6 +61,8 @@ import {
 } from "@dohc/live-session-contract/live-update-admission";
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
+import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
+import { currentIdentity, type RetirementKey } from "./serviceActivationRetirement";
 import type {
   SqliteDb,
   CurrentLiveBindingRequest,
@@ -2133,26 +2135,62 @@ export function commitLiveUpdateJournal(
 export function liveJournalCut(
   storage: StorageContext,
   document: LiveDocumentKey,
+  retirement?: RetirementKey,
 ):
   | { kind: "cut"; cut: LiveUpdateJournalCut }
   | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
-  return readJournalCut(storage, document);
+  return readJournalCut(storage, document, undefined, retirement);
+}
+function retiringRead(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+  stored: StoredLiveDocumentAuthority,
+  key: RetirementKey,
+): boolean {
+  if (
+    key.objectId !== document.objectId ||
+    key.lineageClaimId !== document.lineageClaimId ||
+    stored.binding.restoreFenceGeneration !== key.restoreFenceGeneration
+  )
+    return false;
+  const high = storage.db
+    .prepare(
+      `SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${JOURNAL_DOCUMENT_WHERE}`,
+    )
+    .get(...documentParams(document))!;
+  return (
+    Number(high.cursor) <= key.acceptedThrough &&
+    storage.db
+      .prepare(`SELECT 1 FROM ${SERVICE_ACTIVATIONS} WHERE workspace_id=? AND main_version_id=? AND object_id=?
+        AND lineage_claim_id=? AND activation_id=? AND retire_requested_at_ms IS NOT NULL AND retired_at_ms IS NULL
+        AND retire_restore_generation=? AND retire_accepted_cursor=? AND ${currentIdentity(SERVICE_ACTIVATIONS)}`)
+      .get(
+        ...documentParams(document),
+        key.activationId,
+        key.restoreFenceGeneration,
+        key.acceptedThrough,
+      ) !== undefined
+  );
 }
 function readJournalCut(
   storage: StorageContext,
   document: LiveDocumentKey,
   expected?: LiveUpdateJournalCut,
+  retirement?: RetirementKey,
 ):
   | { kind: "cut"; cut: LiveUpdateJournalCut }
   | Exclude<LiveUpdateJournalCutResult, { kind: "cut" }> {
   const history = journalAuthorityHistory(storage, document);
   if (!history.length) return { kind: "refused", reason: "baseline-missing" };
   const stored = history.find((row) => row.current);
-  if (!stored || !stored.open) return { kind: "refused", reason: "authority-refused" };
+  const retiring =
+    !!stored && !stored.open && !!retirement && retiringRead(storage, document, stored, retirement);
+  if (!stored || !(stored.open || retiring))
+    return { kind: "refused", reason: "authority-refused" };
   if (
     stored.binding.lineageClaimId !== document.lineageClaimId ||
     stored.baselineSequence <= storage.getEpochLogFloor(document.workspaceId) ||
-    !currentLiveDocumentMoment(storage, document, stored.binding.currentPath)
+    (!retiring && !currentLiveDocumentMoment(storage, document, stored.binding.currentPath))
   )
     return { kind: "refused", reason: "stale-binding" };
   const high = storage.db

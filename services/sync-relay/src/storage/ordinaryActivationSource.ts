@@ -6,6 +6,7 @@ import type { LiveDocumentBaselineRegistrationInput, SqliteDb } from "./types";
 import type { StorageContext } from "./context";
 import { ORDINARY_ACTIVATION_BASES, beginsLineage } from "./ordinaryActivationBasis";
 import { ServerLogError } from "../serverLogWords";
+import { parseConflictResolve } from "../conflictResolve";
 import type { OrdinaryActivationBaseline } from "./ordinaryActivationValidation";
 
 export class ServiceActivationStaleCut extends Error {
@@ -163,6 +164,44 @@ export function ordinaryActivationBaseline(
     blob_sha256: held.baseline.projectedMarkdownSha256,
     byte_length: held.baseline.projectedMarkdownByteLength,
   };
+}
+export function ordinaryActivationResolves(
+  storage: StorageContext,
+  cut: VerifiedOrdinaryActivationCut,
+  current: { lineageClaimId: string; baselineSequence: number },
+): boolean {
+  const held = cuts.get(cut);
+  requireValue(held && held.storage === storage, "Ordinary activation source was not verified.");
+  const { source } = held;
+  const resolves = storage.db
+    .prepare(
+      `SELECT relay_seq,payload_json,recorded_at_ms,settlement_admission_json FROM sync_relay_log
+       WHERE workspace_id=? AND relay_seq>? AND relay_seq<=? AND op_kind='conflict.resolve' AND relay_admission IS NULL
+       ORDER BY relay_seq DESC`,
+    )
+    .all(source.workspaceId, current.baselineSequence, held.baseRelaySeq);
+  let claim = source.lineageClaimId;
+  for (const row of resolves) {
+    if (row.relay_seq !== held.baseRelaySeq && claim === source.lineageClaimId) return false;
+    const admission = row.settlement_admission_json;
+    if (admission !== null && JSON.parse(String(admission)).status === "refused") continue;
+    const resolve = parseConflictResolve(String(row.payload_json), {
+      workspaceId: source.workspaceId,
+      recordedAtMs: Number(row.recorded_at_ms),
+    });
+    const transition = resolve.lineageTransition;
+    if (
+      !transition ||
+      !resolve.current.present ||
+      resolve.targetVersionId !== source.mainVersionId ||
+      resolve.current.objectId !== source.objectId ||
+      transition.successor?.lineageClaimId !== claim
+    )
+      continue;
+    claim = transition.predecessorClaimId;
+    if (claim === current.lineageClaimId) return true;
+  }
+  return false;
 }
 function basisValues(
   storage: StorageContext,
