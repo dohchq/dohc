@@ -6,6 +6,7 @@ import {
   RelayUnreachableError,
   RelayClaimRefusedError,
   type PullWorkspaceFromRelayResult,
+  type RelayMaterializedPath,
   type RunRelayPullBatch,
   type PushWorkspaceToRelayResult,
   type RecoverRelayOriginResult,
@@ -57,7 +58,11 @@ export interface CloudSyncEngineOptions {
   // failure is logged and contained so it cannot put relay sync into backoff.
   // `recovered` is true for the first successful pass after a failed one,
   // which is when the relay answers again.
-  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: {
+    recovered: boolean;
+    applied: boolean;
+    fastForwardedPaths: readonly RelayMaterializedPath[];
+  }) => Promise<void>;
   // Runs as every pass ends, while the snapshot still says it is syncing, so
   // the owner can read what the pass left behind, such as a pull it did not
   // finish. Resolves whether that changed what the status shows. A failure
@@ -613,7 +618,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     pulled = { cursor: pullResult.nextCursor, servedChange };
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull({ recovered, applied: pullResult.applied > 0 });
+        await options.afterSuccessfulPull({
+          recovered,
+          applied: pullResult.applied > 0,
+          fastForwardedPaths: pullResult.fastForwardedPaths,
+        });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }

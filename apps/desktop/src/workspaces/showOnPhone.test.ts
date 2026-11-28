@@ -91,24 +91,118 @@ describe("Show on phone", () => {
     expect(relay.requests).toHaveLength(2);
   });
 
-  it("confirms nothing when the read fails, and doesn't ask again until the next refresh", async () => {
-    const { showOnPhone, relay, errors } = setup(() => new Response("down", { status: 503 }));
-    expect(await showOnPhone.shows("w")).toBe(false);
-    expect(await showOnPhone.shows("w")).toBe(false);
-    expect(relay.requests).toHaveLength(1);
+  it("returns null on a failed read and reads again once the server recovers", async () => {
+    let available = false;
+    const { showOnPhone, relay, errors } = setup(() =>
+      available
+        ? listing([{ workspaceId: "w", showOnPhone: true }])
+        : new Response("down", { status: 503 }),
+    );
+    expect(await showOnPhone.shows("w")).toBeNull();
+    available = true;
+    expect(await showOnPhone.shows("w")).toBe(true);
+    expect(relay.requests).toHaveLength(2);
     expect(errors).toHaveLength(1);
   });
 
-  it("confirms nothing from an answer of the wrong shape", async () => {
+  it("returns null from an answer of the wrong shape", async () => {
     const { showOnPhone, errors } = setup(() => Response.json({ ok: true, workspaces: [{}] }));
-    expect(await showOnPhone.shows("w")).toBe(false);
+    expect(await showOnPhone.shows("w")).toBeNull();
     expect(errors).toHaveLength(1);
   });
 
   it("hands an expired session to the sign-in handling", async () => {
     const { showOnPhone, session, errors } = setup(() => new Response(null, { status: 401 }));
-    expect(await showOnPhone.shows("w")).toBe(false);
+    expect(await showOnPhone.shows("w")).toBeNull();
     expect(session()!.unauthorized).toHaveBeenCalledOnce();
     expect(errors).toEqual([]);
+  });
+
+  describe("live notes", () => {
+    it("reads live notes uncached with the session bearer and encodes the workspace id", async () => {
+      let notes = [{ objectId: "obj-1", kinds: ["session"] }];
+      const { showOnPhone, relay } = setup(() => Response.json({ notes }));
+      expect(await showOnPhone.liveNotes("ws/a b")).toEqual(new Set(["obj-1"]));
+      notes = [];
+      expect(await showOnPhone.liveNotes("ws/a b")).toEqual(new Set());
+      expect(relay.requests).toHaveLength(2);
+      expect(relay.requests[0]!.method).toBe("GET");
+      expect(relay.requests[0]!.url).toBe("https://relay.test/sync/ws%2Fa%20b/live-notes");
+      expect(relay.requests[0]!.headers.get("authorization")).toBe("Bearer token-1");
+    });
+
+    it("fails closed when signed out, on server errors, or on an invalid body", async () => {
+      const signedOut = setup(() => Response.json({ notes: [] }));
+      signedOut.setSession(null);
+      expect(await signedOut.showOnPhone.liveNotes("w")).toBeNull();
+      expect(signedOut.errors).toEqual([]);
+
+      const unavailable = setup(() => new Response("down", { status: 503 }));
+      expect(await unavailable.showOnPhone.liveNotes("w")).toBeNull();
+      expect(unavailable.errors).toHaveLength(1);
+
+      const invalid = setup(() => Response.json({ notes: [{ objectId: "" }] }));
+      expect(await invalid.showOnPhone.liveNotes("w")).toBeNull();
+      expect(invalid.errors).toHaveLength(1);
+    });
+
+    it("hands a 401 on live notes to sign-in handling without logging an error", async () => {
+      const { showOnPhone, session, errors } = setup(() => new Response(null, { status: 401 }));
+      expect(await showOnPhone.liveNotes("w")).toBeNull();
+      expect(session()!.unauthorized).toHaveBeenCalledOnce();
+      expect(errors).toEqual([]);
+    });
+
+    it("aborts an in-flight live-notes read when its caller cancels", async () => {
+      let aborted = false;
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              aborted = true;
+              reject(init.signal?.reason);
+            });
+          }),
+      );
+      const errors: unknown[] = [];
+      const showOnPhone = createShowOnPhone({
+        session: async () => ({
+          generation: 1,
+          relay: { baseUrl: "https://relay.test", token: "token-1", fetch },
+          unauthorized: vi.fn(async () => undefined),
+        }),
+        onError: (_message, error) => errors.push(error),
+      });
+      const cancel = new AbortController();
+      const reading = showOnPhone.liveNotes("w", cancel.signal);
+      await vi.advanceTimersByTimeAsync(0);
+      cancel.abort();
+      expect(await reading).toBeNull();
+      expect(aborted).toBe(true);
+      expect(errors).toEqual([]);
+    });
+
+    it("fails closed when the live-notes read times out", async () => {
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+          }),
+      );
+      const errors: unknown[] = [];
+      const showOnPhone = createShowOnPhone({
+        session: async () => ({
+          generation: 1,
+          relay: { baseUrl: "https://relay.test", token: "token-1", fetch },
+          unauthorized: vi.fn(async () => undefined),
+        }),
+        onError: (_message, error) => errors.push(error),
+        liveNotesTimeoutMs: 500,
+      });
+      const reading = showOnPhone.liveNotes("w");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await reading).toBeNull();
+      expect(errors).toHaveLength(1);
+    });
   });
 });

@@ -1185,18 +1185,11 @@ export function createCaptureLiveStores(
       versionId: string;
       fromPath: string;
       toPath: string;
+      requestId?: string;
       metadata: ActorNeutralWriteMetadata;
       author?: MomentWriteAuthor;
       captureHoldId?: string;
     }): ReturnType<VersionedTextStore["renameTextFile"]> {
-      const before = await store.readTextFile({
-        workspaceId: input.workspaceId,
-        versionId: input.versionId,
-        path: input.fromPath,
-      });
-      if (!before) {
-        throw new Error(`Engine text head for ${input.fromPath} disappeared before rename.`);
-      }
       const { author, ...renameInput } = input;
       const raw = await runMutation(
         async (adapter) =>
@@ -1206,19 +1199,27 @@ export function createCaptureLiveStores(
             metadata: adapterMetadata(input.metadata),
           }),
       );
-      const after = await store.readTextFile({
-        workspaceId: input.workspaceId,
-        versionId: input.versionId,
-        path: input.toPath,
-      });
-      if (!after) {
-        throw new Error(`Engine text head for ${input.toPath} disappeared after rename.`);
+      if (!raw.moment.beforePresent) {
+        throw new VersionedTextStoreError(
+          "state-corrupt",
+          `Engine rename result for ${input.fromPath} has no preimage.`,
+        );
       }
+      const hydrated = await hydratedMoment(raw.moment);
+      const wireSnapshot = (wire: typeof raw.before, text: string): VersionedTextReadValue =>
+        wire.contentKind === "text"
+          ? { ...wire, contentKind: "text", blobSha256: wire.sha256, text }
+          : { ...wire, contentKind: "binary", blobSha256: wire.sha256, text: "" };
       return {
         object: raw.object,
-        before,
-        after,
-        moment: momentFromWire(input.workspaceId, await hydratedMoment(raw.moment), input.metadata),
+        before: snapshotFromWire(
+          wireSnapshot(raw.before, payloadSnapshot(hydrated, "before").text),
+        ),
+        after: snapshotFromWire(
+          wireSnapshot(raw.after, payloadSnapshot(hydrated, "after").text),
+          input.metadata,
+        ),
+        moment: momentFromWire(input.workspaceId, hydrated, input.metadata),
       };
     },
 

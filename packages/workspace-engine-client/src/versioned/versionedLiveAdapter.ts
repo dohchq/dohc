@@ -1258,6 +1258,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     versionId: string;
     fromPath: string;
     toPath: string;
+    requestId?: string;
     metadata: AdapterWriteMetadata;
     author?: WriteAuthor | null;
     captureHoldId?: string;
@@ -1278,7 +1279,7 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         ...(input.author ? { author: input.author } : {}),
         ...(input.captureHoldId !== undefined ? { captureHoldId: input.captureHoldId } : {}),
       },
-      { idempotencyKey: randomUUID() },
+      { idempotencyKey: input.requestId ?? randomUUID() },
     );
   }
 

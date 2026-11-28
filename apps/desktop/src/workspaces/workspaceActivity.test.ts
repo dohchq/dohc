@@ -1452,6 +1452,55 @@ describe("workspaceActivity cloud sync nudge", () => {
     await activity.stopAll();
   });
 
+  it("treats stopped auth-expired and update-required sync states as offline", async () => {
+    let authExpired = false;
+    let updateRequired: "app" | "server" | undefined;
+    let syncFailure: CloudSyncFailure | null = null;
+    const engine = {
+      start: async () => {},
+      queueSync: () => {},
+      queueWatchedUpload: () => {},
+      queuePull: () => {},
+      retryNow: async () => undefined,
+      pushRecorded: async () => undefined,
+      catchUp: async () => undefined,
+      snapshot: () => ({
+        syncFailure,
+        retrying: false,
+        syncing: false,
+        lastSyncedAtMs: null,
+        pendingChangeCount: 0,
+        conflictCount: 0,
+        authExpired,
+        ...(updateRequired ? { updateRequired } : {}),
+        sharingDeclined: [],
+      }),
+      stop: async () => {},
+    };
+    const service = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
+      engineFor: () => engine,
+      cloudStateFor: () => ({}),
+    });
+    const state = new WorkspaceActivityState();
+    expect(service.cloudSyncOffline(state)).toBe(true);
+    await service.open(workspace(), state);
+    expect(service.cloudSyncOffline(state)).toBe(false);
+    authExpired = true;
+    expect(service.cloudSyncOffline(state)).toBe(true);
+    authExpired = false;
+    updateRequired = "app";
+    expect(service.cloudSyncOffline(state)).toBe(true);
+    updateRequired = "server";
+    expect(service.cloudSyncOffline(state)).toBe(true);
+    updateRequired = undefined;
+    syncFailure = { cause: "server-unreachable", detail: "offline", sinceMs: 1, attempts: 1 };
+    expect(service.cloudSyncOffline(state)).toBe(true);
+    syncFailure = null;
+    expect(service.cloudSyncOffline(state)).toBe(false);
+    await service.stop(state);
+  });
+
   // Main's completed sign-in stops every engine and attaches one built from
   // the new session, as adoptCompletedCloudLoginSession does. Main builds no
   // engine for a paused workspace, whose pause removed its remote.

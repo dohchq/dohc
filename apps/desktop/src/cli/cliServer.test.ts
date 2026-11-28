@@ -1,5 +1,6 @@
 import type { WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createRelaySyncEngine } from "../workspaces/relaySyncEngine";
+import { syncedNotePaths } from "../workspaces/backgroundLiveStart";
 import { stripTypeScriptTypes } from "node:module";
 import { makeLink as mcpMakeLink } from "@dohc/mcp/tools";
 import { stageDeleteRecovery } from "../workspaces/workspaceDeleteRecovery";
@@ -875,13 +876,17 @@ describe("CLI socket server", () => {
           body: kind === "mention" ? "@agent synced" : "A synced reply",
         };
         const source = await readFile(new URL("../main.ts", import.meta.url), "utf8");
-        const start = source.indexOf("    afterSuccessfulPull: ({ recovered, applied }) => {");
+        const start = source.indexOf(
+          "    afterSuccessfulPull: ({ recovered, applied, fastForwardedPaths }) => {",
+        );
         const end = source.indexOf("\n    // Recorded durably before each pull", start);
         expect(start).toBeGreaterThan(-1);
         expect(end).toBeGreaterThan(start);
         const dependencies = {
           workspace: { workspaceId: WORKSPACE_ID },
           signalChatWrite: chatWriteSignals.signalChatWrite,
+          syncedNotePaths,
+          backgroundLiveStart: { note: vi.fn(), retry: vi.fn() },
           noticeStore: () => ({ sync: vi.fn() }),
           shareRosters: { pulled: vi.fn() },
           refreshShareLabels: vi.fn(),

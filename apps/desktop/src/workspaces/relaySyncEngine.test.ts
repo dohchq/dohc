@@ -8,6 +8,7 @@ import {
   RelayClaimRefusedError,
   type MaterializeRelayPullPage,
   type PullWorkspaceFromRelayResult,
+  type RelayMaterializedPath,
 } from "@dohc/workspace-contracts/relay";
 import { EngineWorkspaceShuttingDownError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -137,7 +138,11 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<boolean>;
-  afterSuccessfulPull?: (pass: { recovered: boolean; applied: boolean }) => Promise<void>;
+  afterSuccessfulPull?: (pass: {
+    recovered: boolean;
+    applied: boolean;
+    fastForwardedPaths: readonly RelayMaterializedPath[];
+  }) => Promise<void>;
   afterPass?: (pass: { failed: boolean }) => Promise<boolean>;
   operations?: RelaySyncOperations;
   idlePullMs?: number;
@@ -787,6 +792,24 @@ describe("relaySyncEngine", () => {
     ]);
 
     errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("passes fastForwardedPaths from the pull to afterSuccessfulPull", async () => {
+    const fastForwardedPaths: RelayMaterializedPath[] = [
+      { versionId: "main", path: "notes/synced.md", operation: "write", contentKind: "text" },
+      { versionId: "main", path: "notes/removed.md", operation: "delete", contentKind: "text" },
+    ];
+    pullMock.mockResolvedValueOnce(pullResult({ applied: 2, fastForwardedPaths }));
+    const afterSuccessfulPull = vi.fn(async () => undefined);
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+
+    await sync.start();
+    expect(afterSuccessfulPull).toHaveBeenCalledWith({
+      recovered: false,
+      applied: true,
+      fastForwardedPaths,
+    });
     await sync.stop();
   });
 

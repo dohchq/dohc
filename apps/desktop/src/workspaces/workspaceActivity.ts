@@ -1070,8 +1070,8 @@ export function createWorkspaceActivity(
   // The move guard's pull. A workspace without an engine counts as offline,
   // so the guard skips its catch-up.
   function cloudSyncOffline(state: WorkspaceActivityState): boolean {
-    const snapshot = state.entry?.engine?.snapshot();
-    return !snapshot || snapshot.syncFailure !== null;
+    const s = state.entry?.engine?.snapshot();
+    return !s || s.syncFailure !== null || s.authExpired || !!s.updateRequired;
   }
   async function catchUpCloudSync(
     state: WorkspaceActivityState,

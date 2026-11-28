@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BACKGROUND_LIVE_START_MAX_QUEUED,
   createBackgroundLiveStart,
+  syncedNotePaths,
   type BackgroundLiveStartOptions,
 } from "./backgroundLiveStart";
 import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "./workspaceTextLimits";
@@ -14,8 +15,10 @@ function setup(overrides: Partial<BackgroundLiveStartOptions> = {}) {
   const errors: unknown[] = [];
   const options: BackgroundLiveStartOptions = {
     eligible: () => true,
-    noteIdentity: async (_workspaceId, path) => `object:${path}`,
+    noteIdentity: async (_workspaceId, path) => ({ versionId: "main", objectId: `object:${path}` }),
     showsOnPhone: async () => true,
+    catchUp: async () => true,
+    relayLiveNotes: async () => new Set(),
     noteBytes: async () => 10,
     isLossyNote: async () => false,
     start: async (workspaceId, path) => {
@@ -216,7 +219,8 @@ describe("background live start", () => {
   it("starts a different note created at a started note's old path", async () => {
     const objects: Record<string, string> = { "agent.md": "first" };
     const { queue, started } = setup({
-      noteIdentity: async (_workspaceId, path) => objects[path] ?? null,
+      noteIdentity: async (_workspaceId, path) =>
+        objects[path] ? { versionId: "main", objectId: objects[path] } : null,
     });
     queue.note("w", ["agent.md"]);
     await vi.advanceTimersByTimeAsync(QUIET);
@@ -233,7 +237,8 @@ describe("background live start", () => {
   it("doesn't remember a note whose path held another object by the time it started", async () => {
     const objects: Record<string, string> = { "a.md": "first" };
     const { queue, started } = setup({
-      noteIdentity: async (_workspaceId, path) => objects[path] ?? null,
+      noteIdentity: async (_workspaceId, path) =>
+        objects[path] ? { versionId: "main", objectId: objects[path] } : null,
       start: async (workspaceId, path) => {
         started.push(`${workspaceId}:${path}`);
         objects["a.md"] = "second";
@@ -245,6 +250,217 @@ describe("background live start", () => {
     queue.note("w", ["b.md"]);
     await vi.advanceTimersByTimeAsync(QUIET);
     expect(started).toEqual(["w:a.md", "w:b.md"]);
+  });
+
+  it("skips a note that is already live on the relay, and can start it once it is no longer live", async () => {
+    const live = new Set(["object:live.md"]);
+    const { queue, started } = setup({
+      relayLiveNotes: async () => new Set(live),
+    });
+    queue.note("w", ["live.md", "plain.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(started).toEqual(["w:plain.md"]);
+
+    live.clear();
+    queue.note("w", ["live.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:plain.md", "w:live.md"]);
+  });
+
+  it("fails closed on transient live-notes failure and retries after the next pull", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      relayLiveNotes: async () => (available ? new Set() : null),
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + GAP);
+    expect(started).toEqual([]);
+
+    available = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("defers on catch-up failure, ignores retry during its own catch-up, and retries after recovery", async () => {
+    let online = false;
+    let catchUpCalls = 0;
+    const { queue, started } = setup({
+      catchUp: async () => {
+        catchUpCalls += 1;
+        // Simulate afterSuccessfulPull firing while this workspace's startNote is in flight.
+        queue.retry("w");
+        return online;
+      },
+    });
+    queue.note("w", ["a.md", "b.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(started).toEqual([]);
+    expect(catchUpCalls).toBe(2);
+
+    online = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET + 2 * GAP);
+    expect(started).toEqual(["w:a.md", "w:b.md"]);
+  });
+
+  it("drops deferred retries on workspace close", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      relayLiveNotes: async () => (available ? new Set() : null),
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+
+    await queue.drop("w");
+    available = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET + GAP);
+    expect(started).toEqual([]);
+  });
+
+  it("skips starting if the path changed to another note during the relay live-notes check", async () => {
+    const objects: Record<string, string> = { "a.md": "plain" };
+    const { queue, started } = setup({
+      noteIdentity: async (_workspaceId, path) =>
+        objects[path] ? { versionId: "main", objectId: objects[path] } : null,
+      relayLiveNotes: async () => {
+        objects["a.md"] = "live-elsewhere";
+        return new Set(["live-elsewhere"]);
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+  });
+
+  it("skips starting if the path changed to another note during the lossiness check", async () => {
+    const objects: Record<string, string> = { "a.md": "plain" };
+    const { queue, started } = setup({
+      noteIdentity: async (_workspaceId, path) =>
+        objects[path] ? { versionId: "main", objectId: objects[path] } : null,
+      relayLiveNotes: async () => new Set(["live-elsewhere"]),
+      isLossyNote: async () => {
+        objects["a.md"] = "live-elsewhere";
+        return false;
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+  });
+
+  it("does not delay a queued Markdown note when non-Markdown paths arrive", async () => {
+    const { queue, started } = setup();
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    queue.note("w", ["data.json", ".dohc/internal.md"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("still resets the quiet timer for an already-queued note following an overflow path when full", async () => {
+    const { queue, started } = setup();
+    const full = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED }, (_, i) => `n${i}.md`);
+    queue.note("w", full);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    queue.note("w", ["overflow.md", "n0.md"]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(started).toEqual([]);
+    await vi.advanceTimersByTimeAsync(QUIET - 1_000);
+    expect(started).toEqual(["w:n0.md"]);
+  });
+
+  it("defers on transient Show on phone failure and retries once visibility recovers", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      showsOnPhone: async () => (available ? true : null),
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET + GAP);
+    expect(started).toEqual([]);
+
+    available = true;
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("keeps deferred retries when a recovery pull fills the queue, and starts them on the next pull", async () => {
+    let available = false;
+    const { queue, started } = setup({
+      relayLiveNotes: async () => (available ? new Set() : null),
+    });
+    queue.note("w", ["deferred.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toEqual([]);
+
+    available = true;
+    const burst = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED }, (_, i) => `n${i}.md`);
+    queue.note("w", burst);
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET + burst.length * GAP);
+    expect(started).toHaveLength(BACKGROUND_LIVE_START_MAX_QUEUED);
+    expect(started).not.toContain("w:deferred.md");
+
+    queue.retry("w");
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(started).toContain("w:deferred.md");
+  });
+
+  it("runs catch-up after reading relay live-notes so edits and seeds arriving mid-check are pulled first", async () => {
+    const order: string[] = [];
+    const { queue, started } = setup({
+      relayLiveNotes: async () => {
+        order.push("live-notes");
+        return new Set();
+      },
+      catchUp: async () => {
+        order.push("catch-up");
+        return true;
+      },
+      noteBytes: async () => {
+        order.push("bytes");
+        return 10;
+      },
+      start: async (workspaceId, path) => {
+        order.push("start");
+        started.push(`${workspaceId}:${path}`);
+      },
+    });
+    queue.note("w", ["a.md"]);
+    await vi.advanceTimersByTimeAsync(QUIET);
+    expect(order).toEqual(["live-notes", "catch-up", "bytes", "start"]);
+    expect(started).toEqual(["w:a.md"]);
+  });
+
+  it("starts only tracked main Markdown text writes from synced fastForwardedPaths, bounded to the queue cap", async () => {
+    const filtered = syncedNotePaths([
+      { versionId: "main", path: "notes/synced.md", operation: "write", contentKind: "text" },
+      { versionId: "main", path: "notes/UPPER.MD", operation: "write", contentKind: "text" },
+      { versionId: "main", path: "notes/deleted.md", operation: "delete", contentKind: "text" },
+      { versionId: "main", path: "assets/img.png", operation: "write", contentKind: "binary" },
+      { versionId: "main", path: ".env", operation: "write", contentKind: "secret" },
+      { versionId: "main", path: ".dohc/internal.md", operation: "write", contentKind: "text" },
+      { versionId: "main", path: "data/table.json", operation: "write", contentKind: "text" },
+      { versionId: "draft-1", path: "notes/branch.md", operation: "write", contentKind: "text" },
+    ]);
+    const single = setup();
+    single.queue.note("w", filtered);
+    await vi.advanceTimersByTimeAsync(QUIET + 10 * GAP);
+    expect(single.started).toEqual(["w:notes/synced.md", "w:notes/UPPER.MD"]);
+
+    const { queue, started } = setup();
+    const burst = Array.from({ length: BACKGROUND_LIVE_START_MAX_QUEUED + 6 }, (_, i) => ({
+      versionId: "main",
+      path: `synced/n${i}.md`,
+      operation: "write" as const,
+      contentKind: "text" as const,
+    }));
+    queue.note("w", syncedNotePaths(burst));
+    await vi.advanceTimersByTimeAsync(QUIET + burst.length * GAP);
+    expect(started).toHaveLength(BACKGROUND_LIVE_START_MAX_QUEUED);
   });
 
   it("starts nothing in a workspace its server doesn't confirm shows on the phone", async () => {
@@ -340,6 +556,25 @@ describe("background live start", () => {
       const stopping = settledFlag(queue.stop());
       await vi.advanceTimersByTimeAsync(0);
       expect(stopping.settled).toBe(true);
+      expect(started).toEqual([]);
+    });
+
+    it("on quit, aborts an in-flight relay live-notes check without waiting", async () => {
+      let aborted = false;
+      const { queue, started } = setup({
+        relayLiveNotes: (_workspaceId, signal) =>
+          new Promise<ReadonlySet<string> | null>(() => {
+            signal.addEventListener("abort", () => {
+              aborted = true;
+            });
+          }),
+      });
+      queue.note("w", ["a.md"]);
+      await vi.advanceTimersByTimeAsync(QUIET);
+      const stopping = settledFlag(queue.stop());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopping.settled).toBe(true);
+      expect(aborted).toBe(true);
       expect(started).toEqual([]);
     });
 
