@@ -1,0 +1,340 @@
+{
+  "bounds": [
+    {
+      "structs": 0,
+      "rootEntries": 0,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 55000
+    },
+    {
+      "structs": 1,
+      "rootEntries": 1,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 55123
+    },
+    {
+      "structs": 2,
+      "rootEntries": 0,
+      "keySorts": 1,
+      "astral": 1,
+      "indexOperations": 55886
+    },
+    {
+      "structs": 100000,
+      "rootEntries": 10,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 98721810
+    },
+    {
+      "structs": 5,
+      "rootEntries": 3,
+      "keySorts": 0,
+      "astral": 500000,
+      "indexOperations": 52307092
+    },
+    {
+      "structs": 96009,
+      "rootEntries": 7,
+      "keySorts": 17400000,
+      "astral": 0,
+      "indexOperations": 152204848
+    },
+    {
+      "structs": 0,
+      "rootEntries": 0,
+      "keySorts": 30286363,
+      "astral": 0,
+      "indexOperations": 99999998
+    },
+    {
+      "structs": 131073,
+      "rootEntries": 65536,
+      "keySorts": 1234567,
+      "astral": 123457,
+      "indexOperations": 138369971
+    }
+  ],
+  "notes": [
+    {
+      "name": "a body of paragraphs at the struct cap",
+      "frontmatter": [],
+      "body": [
+        [
+          24975,
+          "a\n\n"
+        ]
+      ],
+      "structs": 99908,
+      "rootEntries": 5,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 98632629,
+      "format": 2
+    },
+    {
+      "name": "mark-dense lines at the struct cap",
+      "frontmatter": [],
+      "body": [
+        [
+          12495,
+          "**a**b*c*d "
+        ]
+      ],
+      "structs": 99968,
+      "rootEntries": 5,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 98691831,
+      "format": 2
+    },
+    {
+      "name": "a realistic note near the struct cap",
+      "frontmatter": [
+        [
+          1,
+          "---\ntitle: Notes\ntags: [a, b]\n---\n"
+        ]
+      ],
+      "body": [
+        [
+          1000,
+          "## Heading\n\nSome *text* with a [link](https://example.com/a) and **bold** words.\n\n- item one\n- item two\n- item three\n\n> quote line\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n"
+        ]
+      ],
+      "structs": 92013,
+      "rootEntries": 39010,
+      "keySorts": 135000,
+      "astral": 0,
+      "indexOperations": 78845538,
+      "format": 2
+    },
+    {
+      "name": "a list of 10,000 items",
+      "frontmatter": [],
+      "body": [
+        [
+          10000,
+          "- a\n"
+        ]
+      ],
+      "structs": 60009,
+      "rootEntries": 20009,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 50836703,
+      "format": 2
+    },
+    {
+      "name": "a table of 1,000 cells",
+      "frontmatter": [],
+      "body": [
+        [
+          1,
+          "| h | h | h | h | h | h | h | h | h | h |\n"
+        ],
+        [
+          1,
+          "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        ],
+        [
+          100,
+          "| c | c | c | c | c | c | c | c | c | c |\n"
+        ]
+      ],
+      "structs": 9298,
+      "rootEntries": 5258,
+      "keySorts": 0,
+      "astral": 0,
+      "indexOperations": 6600850,
+      "format": 2
+    },
+    {
+      "name": "one paragraph of 250,000 astral letters",
+      "frontmatter": [],
+      "body": [
+        [
+          250000,
+          "😀"
+        ]
+      ],
+      "structs": 9,
+      "rootEntries": 5,
+      "keySorts": 0,
+      "astral": 250000,
+      "indexOperations": 24809088,
+      "format": 2
+    },
+    {
+      "name": "400,000 astral letters and 24,000 paragraphs",
+      "frontmatter": [],
+      "body": [
+        [
+          400000,
+          "😀"
+        ],
+        [
+          1,
+          "\n\n"
+        ],
+        [
+          24000,
+          "a\n\n"
+        ]
+      ],
+      "structs": 96012,
+      "rootEntries": 5,
+      "keySorts": 0,
+      "astral": 400000,
+      "indexOperations": 144615133,
+      "format": 1
+    },
+    {
+      "name": "20,000 keys in a map and 24,000 paragraphs",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n"
+        ],
+        [
+          20000,
+          "  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          24000,
+          "a\n\n"
+        ]
+      ],
+      "structs": 96011,
+      "rootEntries": 8,
+      "keySorts": 17400000,
+      "astral": 0,
+      "indexOperations": 152206502,
+      "format": 1
+    },
+    {
+      "name": "20,000 keys in a map and paragraphs just under the limit",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n"
+        ],
+        [
+          20000,
+          "  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          11050,
+          "a\n\n"
+        ]
+      ],
+      "structs": 44211,
+      "rootEntries": 8,
+      "keySorts": 17400000,
+      "astral": 0,
+      "indexOperations": 99587847,
+      "format": 2
+    },
+    {
+      "name": "20,000 keys in a map and paragraphs just over the limit",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n"
+        ],
+        [
+          20000,
+          "  kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          11250,
+          "a\n\n"
+        ]
+      ],
+      "structs": 45011,
+      "rootEntries": 8,
+      "keySorts": 17400000,
+      "astral": 0,
+      "indexOperations": 100349927,
+      "format": 1
+    },
+    {
+      "name": "2,000 keys of 100 bytes in a map",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n"
+        ],
+        [
+          2000,
+          "  qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          1,
+          "a\n"
+        ]
+      ],
+      "structs": 12,
+      "rootEntries": 8,
+      "keySorts": 2266000,
+      "astral": 0,
+      "indexOperations": 7536769,
+      "format": 2
+    },
+    {
+      "name": "a map with a constructor key, written as a shared map",
+      "frontmatter": [
+        [
+          1,
+          "---\ntable:\n  constructor: 1\n"
+        ],
+        [
+          2000,
+          "  k{i}: {i}\n"
+        ],
+        [
+          1,
+          "---\n"
+        ]
+      ],
+      "body": [
+        [
+          1,
+          "a\n"
+        ]
+      ],
+      "structs": 2013,
+      "rootEntries": 8,
+      "keySorts": 308154,
+      "astral": 0,
+      "indexOperations": 2643724,
+      "format": 2
+    }
+  ]
+}

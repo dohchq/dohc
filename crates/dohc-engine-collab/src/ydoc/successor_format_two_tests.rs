@@ -2,6 +2,8 @@ use super::*;
 
 const WRITTEN_NOTES: &str =
     include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence.json");
+const FIT: &str =
+    include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence-fit.json");
 const LINKS: &str =
     "# Title\n\nSee [a link](https://example.com).\n\nAnd [another](https://example.org \"Its title\").\n";
 const KEPT_FRONTMATTER: &str = "---\n# kept\ntitle: A\ntags: b\nstatus: c\nowner: d\n---\n\nBody\n";
@@ -357,4 +359,68 @@ fn a_collection_relation_seed_format_two_cannot_hold_is_written_in_format_one() 
             );
         });
     });
+}
+
+#[test]
+fn takes_each_recipe_in_the_format_typescript_took_it_counting_no_more_index_operations() {
+    type Parts = Vec<(usize, String)>;
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Note {
+        name: String,
+        frontmatter: Parts,
+        body: Parts,
+        index_operations: usize,
+        format: u8,
+    }
+    #[derive(serde::Deserialize)]
+    struct Fit {
+        notes: Vec<Note>,
+    }
+    let expand = |parts: &Parts| -> String {
+        parts
+            .iter()
+            .map(|(count, text)| {
+                if text.contains("{i}") {
+                    (0..*count)
+                        .map(|i| text.replace("{i}", &i.to_string()))
+                        .collect()
+                } else {
+                    text.repeat(*count)
+                }
+            })
+            .collect()
+    };
+    let fit: Fit = serde_json::from_str(FIT).expect("the fit fixture parses");
+    assert_eq!(fit.notes.len(), 12);
+    let unlike: Vec<String> = reading_body_sequence_here(|| {
+        fit.notes
+            .iter()
+            .filter_map(|note| {
+                let markdown = expand(&note.frontmatter) + &expand(&note.body);
+                let asked = identity(&markdown, 2);
+                let base = match fresh_successor_base(&asked, &markdown) {
+                    Ok(base) => base,
+                    Err(error) => return Some(format!("{}: {error:?}", note.name)),
+                };
+                let made = Ydoc::wire();
+                made.apply(&base.update).expect("successor update");
+                let candidate = match successor_doc(&asked, &markdown, 2.0) {
+                    Ok(candidate) => candidate,
+                    Err(error) => return Some(format!("{} in format 2: {error:?}", note.name)),
+                };
+                let counted = candidate.live_note_weight(&markdown).index_operations();
+                let refused = base.does_not_fit.map(|over| (over.limit, over.used));
+                let expected = (note.format == 1).then_some(("maxIndexOperations", counted));
+                let alike = made.note_schema_version() == note.format
+                    && counted <= note.index_operations
+                    && refused == expected;
+                (!alike).then(|| {
+                    let format = made.note_schema_version();
+                    format!("{}: format {format}, {counted}, {refused:?}", note.name)
+                })
+            })
+            .collect()
+    });
+    assert_eq!(unlike, Vec::<String>::new());
 }

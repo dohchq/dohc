@@ -19,7 +19,7 @@ import {
   BODY_SEQUENCE_FIELD,
   MAX_SEQUENCE_DEPTH,
 } from "./bodySequenceStore.js";
-import type { NewNoteCounts } from "./liveValidationPolicy.js";
+import { astralLetters, keySorts, type NewNoteCounts } from "./liveValidationPolicy.js";
 
 /**
  * A container as a writer holds it. Neighbouring lines in one container hold the same object, so
@@ -1398,12 +1398,16 @@ export function newBodyWeight(
   let engineNodes = 0;
   let engineBytes = 0;
   let containers = 0;
+  let rootEntries = 0;
+  let sorted = 0;
+  let astral = 0;
   const read: Read = { values: 0, bytes: 0 };
   const marked: Read = { values: 0, bytes: 0 };
   const attributes = (attrs: ProseMirrorNode["attrs"]) => {
     for (const [key, value] of Object.entries(attrs)) {
       if (key === "type" || key === "path") continue;
       stored(read, value);
+      sorted += keySorts(value);
       engineNodes++;
       if (typeof value === "string") engineBytes += utf8ByteLength(value);
       else if (Array.isArray(value)) engineNodes += value.length;
@@ -1442,6 +1446,7 @@ export function newBodyWeight(
         continue;
       }
       const letters = utf8ByteLength(inline.text ?? "");
+      astral += astralLetters(inline.text ?? "");
       const marks = inline.marks;
       structs += 1 + 2 * marks.length;
       read.bytes += letters;
@@ -1457,6 +1462,7 @@ export function newBodyWeight(
         marked.bytes += 2 * kind(mark.type, () => ({ structs: 0, keyBytes: 0 })).nameBytes;
         marked.values++;
         stored(marked, mark.attrs);
+        sorted += keySorts(mark.attrs);
         engineNodes++;
         for (const value of Object.values(mark.attrs)) {
           engineNodes++;
@@ -1489,10 +1495,14 @@ export function newBodyWeight(
       }));
       const idBytes = utf8ByteLength(idFor(child, containers++));
       structs += container.structs;
+      rootEntries += container.structs;
       read.bytes += container.keyBytes + container.structs * idBytes + container.nameBytes;
       read.values++;
-      for (const [key, fallback] of starting)
-        stored(read, Object.hasOwn(child.attrs, key) ? child.attrs[key] : fallback);
+      for (const [key, fallback] of starting) {
+        const value = Object.hasOwn(child.attrs, key) ? child.attrs[key] : fallback;
+        stored(read, value);
+        sorted += keySorts(value);
+      }
       engineNodes++;
       engineBytes += container.nameBytes;
       for (const value of Object.values(child.attrs)) {
@@ -1510,6 +1520,9 @@ export function newBodyWeight(
   return {
     structs,
     elements,
+    rootEntries,
+    keySorts: sorted,
+    astral,
     values: read.values,
     markValues: marked.values,
     bytes: read.bytes,

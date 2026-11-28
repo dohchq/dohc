@@ -100,8 +100,8 @@ pub use scene_lifecycle::{
 };
 pub use ydoc::{
     fresh_successor_base, merge_updates, new_note_schema_version, seed_client_id, ContentKind,
-    OffsetMode, Projection, SuccessorBase, SuccessorIdentity, SuccessorIdentityInput, Ydoc,
-    LINEAGE_EPOCH_META_KEY, ROOT_BODY, ROOT_FRONTMATTER, ROOT_META, ROOT_PLAINTEXT,
+    OffsetMode, Overweight, Projection, SuccessorBase, SuccessorIdentity, SuccessorIdentityInput,
+    Ydoc, LINEAGE_EPOCH_META_KEY, ROOT_BODY, ROOT_FRONTMATTER, ROOT_META, ROOT_PLAINTEXT,
     ROOT_SCENE_APP_STATE, ROOT_SCENE_ASSETS, ROOT_SCENE_REVISIONS,
 };
 

@@ -16,6 +16,14 @@ const SAVE_VISITS_PER_STRUCT: usize = 4;
 const SAVE_VISITS_PER_VALUE: usize = 7;
 const LIVE_NOTE_CAPACITY: usize = 280_000;
 const LIVE_NOTE_ELEMENT_WEIGHT: usize = 6;
+const MAX_INDEX_OPERATIONS: usize = 100_000_000;
+const INDEX_OPERATIONS_PER_NOTE: usize = 50_000;
+const INDEX_OPERATIONS_PER_STRUCT_SEARCH: usize = 31;
+const INDEX_OPERATIONS_PER_STRUCT: usize = 370;
+const INDEX_OPERATIONS_PER_ROOT_ENTRY: usize = 80;
+const KEY_SORT_PASSES: usize = 3;
+const INDEX_OPERATIONS_PER_ASTRAL_SEARCH: usize = 5;
+const INDEX_OPERATIONS_PER_BOUNDARY_SEARCH: usize = 4;
 const SHA256_HEX_BYTES: usize = 64;
 
 const KINDS_A_CONTAINER_CAN_BECOME: [&[&str]; 4] = [
@@ -239,6 +247,13 @@ pub(super) struct Weight {
     elements: usize,
     values: usize,
     bytes: usize,
+    root_entries: usize,
+    key_sorts: usize,
+    astral: usize,
+}
+
+fn log2_up(count: usize) -> usize {
+    (usize::BITS - count.saturating_sub(1).leading_zeros()) as usize
 }
 
 impl Weight {
@@ -253,6 +268,7 @@ impl Weight {
             match root {
                 Out::YMap(map) => {
                     for (key, value) in map.iter(&txn) {
+                        weight.root_entries += 1;
                         weight.item(name.len() + key.len());
                         weight.out(value);
                     }
@@ -277,7 +293,10 @@ impl Weight {
 
     fn text_item<T: ReadTxn>(&mut self, txn: &T, root_bytes: usize, item: TextItem<'_>) {
         match item {
-            TextItem::Letters(text) => self.item(root_bytes + text.len()),
+            TextItem::Letters(text) => {
+                self.item(root_bytes + text.len());
+                self.astral += text.bytes().filter(|byte| *byte >= 0xF0).count();
+            }
             TextItem::Format(key, value) => {
                 self.item(root_bytes + key.len());
                 self.any(value);
@@ -312,6 +331,11 @@ impl Weight {
             Any::Buffer(bytes) => self.bytes += bytes.len(),
             Any::Array(values) => values.iter().for_each(|value| self.any(value)),
             Any::Map(values) => {
+                let longest = values.keys().map(String::len).max().unwrap_or(0);
+                self.key_sorts += match values.len() {
+                    keys @ 0..=1 => keys,
+                    keys => keys * log2_up(keys) * (longest + 3),
+                };
                 for (key, value) in values.iter() {
                     self.bytes += key.len();
                     self.any(value);
@@ -328,6 +352,7 @@ impl Weight {
             MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
         ];
         self.structs += keys.len();
+        self.root_entries += keys.len();
         self.values += keys.len();
         self.bytes += markdown.len() + 2 * SHA256_HEX_BYTES;
         self.bytes += keys
@@ -337,11 +362,59 @@ impl Weight {
         self
     }
 
-    pub(super) fn fits_a_live_note(&self) -> bool {
-        SAVE_VISITS_PER_STRUCT * self.structs <= MAX_STRUCT_VISITS
-            && self.structs + LIVE_NOTE_ELEMENT_WEIGHT * self.elements <= LIVE_NOTE_CAPACITY
-            && SAVE_VISITS_PER_VALUE * self.values <= MAX_VALUE_NODE_VISITS
-            && SAVE_VISITS_PER_VALUE * self.bytes <= MAX_DECODED_PAYLOAD_BYTE_VISITS
+    pub(super) fn index_operations(&self) -> usize {
+        let operations = INDEX_OPERATIONS_PER_NOTE
+            + INDEX_OPERATIONS_PER_STRUCT_SEARCH * self.structs * log2_up(self.structs.max(2))
+            + INDEX_OPERATIONS_PER_STRUCT * self.structs.saturating_sub(self.root_entries)
+            + INDEX_OPERATIONS_PER_ROOT_ENTRY * self.root_entries
+            + KEY_SORT_PASSES * self.key_sorts
+            + INDEX_OPERATIONS_PER_ASTRAL_SEARCH * self.astral * log2_up(self.astral)
+            + INDEX_OPERATIONS_PER_BOUNDARY_SEARCH * (self.structs + 1) * log2_up(self.astral);
+        (operations * 11).div_ceil(10)
+    }
+
+    pub(super) fn fits_a_live_note(&self) -> Result<(), Overweight> {
+        let structs = SAVE_VISITS_PER_STRUCT * self.structs;
+        let weight = self.structs + LIVE_NOTE_ELEMENT_WEIGHT * self.elements;
+        let values = SAVE_VISITS_PER_VALUE * self.values;
+        let bytes = SAVE_VISITS_PER_VALUE * self.bytes;
+        [
+            (
+                "maxStructVisits",
+                "struct visits",
+                structs,
+                MAX_STRUCT_VISITS,
+            ),
+            ("liveNoteCapacity", "weight", weight, LIVE_NOTE_CAPACITY),
+            (
+                "maxValueNodeVisits",
+                "value visits",
+                values,
+                MAX_VALUE_NODE_VISITS,
+            ),
+            (
+                "maxDecodedPayloadByteVisits",
+                "byte visits",
+                bytes,
+                MAX_DECODED_PAYLOAD_BYTE_VISITS,
+            ),
+            (
+                "maxIndexOperations",
+                "index operations",
+                self.index_operations(),
+                MAX_INDEX_OPERATIONS,
+            ),
+        ]
+        .into_iter()
+        .find(|&(_, _, used, max)| used > max)
+        .map_or(Ok(()), |(limit, unit, used, max)| {
+            Err(Overweight {
+                limit,
+                unit,
+                used,
+                max,
+            })
+        })
     }
 }
 
@@ -355,6 +428,8 @@ mod tests {
     );
     const POLICY: &str =
         include_str!("../../../../packages/ydoc-projection/src/liveValidationPolicy.ts");
+    const FIT: &str =
+        include_str!("../../../../packages/ydoc-projection/src/fixtures/body-sequence-fit.json");
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -456,10 +531,18 @@ mod tests {
             "maxValueNodeVisits: 7,",
             "maxDecodedPayloadByteVisits: 7,",
             "SAVE_VISITS_OUTSIDE_A_MARK = 4;",
+            "maxIndexOperations: 100_000_000,",
+            "  note: 50_000,",
+            "  structSearch: 31,",
+            "  struct: 370,",
+            "  rootEntry: 80,",
+            "  keySortPass: 3,",
+            "  astralSearch: 5,",
+            "  boundarySearch: 4,",
         ] {
             assert!(POLICY.contains(declared), "{declared}");
         }
-        let at_most = |weight: Weight| weight.fits_a_live_note();
+        let at_most = |weight: Weight| weight.fits_a_live_note().is_ok();
         let structs = Weight {
             structs: MAX_STRUCT_VISITS / SAVE_VISITS_PER_STRUCT,
             ..Weight::default()
@@ -486,6 +569,63 @@ mod tests {
             ..Weight::default()
         };
         assert!(!at_most(bytes));
+    }
+
+    #[test]
+    fn counts_the_index_operations_typescript_counts_and_names_the_first_limit_a_note_passes() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Bound {
+            structs: usize,
+            root_entries: usize,
+            key_sorts: usize,
+            astral: usize,
+            index_operations: usize,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fit {
+            bounds: Vec<Bound>,
+        }
+        let fit: Fit = serde_json::from_str(FIT).expect("the fit fixture parses");
+        assert_eq!(fit.bounds.len(), 8);
+        for bound in fit.bounds {
+            let weight = Weight {
+                structs: bound.structs,
+                root_entries: bound.root_entries,
+                key_sorts: bound.key_sorts,
+                astral: bound.astral,
+                ..Weight::default()
+            };
+            assert_eq!(weight.index_operations(), bound.index_operations);
+        }
+        let over = |weight: Weight| weight.fits_a_live_note().unwrap_err();
+        let structs = Weight {
+            structs: MAX_STRUCT_VISITS / SAVE_VISITS_PER_STRUCT + 1,
+            ..Weight::default()
+        };
+        assert_eq!(
+            over(structs),
+            Overweight {
+                limit: "maxStructVisits",
+                unit: "struct visits",
+                used: MAX_STRUCT_VISITS + SAVE_VISITS_PER_STRUCT,
+                max: MAX_STRUCT_VISITS,
+            }
+        );
+        let sorted = |key_sorts| Weight {
+            key_sorts,
+            ..Weight::default()
+        };
+        assert!(sorted(30_286_363).fits_a_live_note().is_ok());
+        assert_eq!(
+            over(sorted(30_286_364)),
+            Overweight {
+                limit: "maxIndexOperations",
+                unit: "index operations",
+                used: 100_000_002,
+                max: MAX_INDEX_OPERATIONS,
+            }
+        );
     }
 
     fn reading_of(markdown: &str) -> Vec<MarkdownNode> {
