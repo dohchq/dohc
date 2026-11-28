@@ -20,7 +20,11 @@ const DOC: (&str, &str) = ("object-a", "doc.md");
 const OTHER: (&str, &str) = ("object-b", "other.md");
 
 fn on<R>(run: impl FnOnce() -> R) -> R {
-    writing_new_notes_in_format_two_here(|| reading_body_sequence_here(run))
+    reading_body_sequence_here(run)
+}
+
+fn with_new_notes<R>(run: impl FnOnce() -> R) -> R {
+    writing_new_notes_in_format_two_here(|| on(run))
 }
 
 fn committed<T: std::fmt::Debug>(outcome: TxnOutcome<T>) -> T {
@@ -670,7 +674,7 @@ fn a_note_format_two_cannot_hold_is_left_in_format_one() {
 fn a_note_waits_while_it_is_live_unsent_or_switched_off() {
     let (_scratch, mut store, key) = owner(&base_of(&[NOTE]));
     assert_eq!(
-        reading_body_sequence_here(|| convert(&mut store, &key, &NoLiveLeases)),
+        convert(&mut store, &key, &NoLiveLeases),
         FormatTwoConversion::NotNow("note-format-two-off")
     );
     assert_eq!(
@@ -1223,7 +1227,7 @@ fn convert_all_elsewhere(
     here: &dyn LeaseProbe,
     elsewhere: &dyn LeaseProbe,
 ) -> FormatTwoPass {
-    on(|| {
+    with_new_notes(|| {
         convert_notes_to_format_two(
             store,
             "ws",
@@ -1261,19 +1265,17 @@ fn the_pass_converts_within_its_budget_and_resumes_where_it_stopped() {
             )
         })
         .collect();
-    let off = reading_body_sequence_here(|| {
-        convert_notes_to_format_two(
-            &mut store,
-            "ws",
-            None,
-            2,
-            &NoLiveLeases,
-            &NoLiveLeases,
-            &|_, _, _| Ok(None),
-            &NoFaults,
-            21,
-        )
-    })
+    let off = convert_notes_to_format_two(
+        &mut store,
+        "ws",
+        None,
+        2,
+        &NoLiveLeases,
+        &NoLiveLeases,
+        &|_, _, _| Ok(None),
+        &NoFaults,
+        21,
+    )
     .unwrap();
     assert!(off.off);
     assert_eq!(off.converted.len(), 0);
@@ -1507,7 +1509,7 @@ fn a_local_note_with_an_unsettled_edit_keeps_it_whatever_the_file_proof() {
     exec(&mut store, "UPDATE ydoc_docs SET pending_authors_json='[]'");
     let before = head(&store, &key);
     let settled = hex_sha256(NOTE.as_bytes());
-    let pass = on(|| {
+    let pass = with_new_notes(|| {
         convert_notes_to_format_two(
             &mut store,
             "ws",
@@ -1615,6 +1617,70 @@ fn a_local_only_workspace_drops_its_format_one_cache_offline() {
 }
 
 #[test]
+fn a_local_only_note_waits_while_new_notes_are_written_in_format_one() {
+    let (_scratch, _path, mut store) = open_store();
+    let key = settled_local_note(&mut store, NOTE);
+    let before = (head(&store, &key), changes(&store));
+    let pass = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        (pass.converted.len(), pass.skipped),
+        (
+            0,
+            vec![(
+                key.clone(),
+                "doc.md".to_owned(),
+                "local-new-notes-format-one"
+            )]
+        )
+    );
+    assert_eq!((head(&store, &key), changes(&store)), before);
+    assert_eq!(
+        convert_all(&mut store, None, 10, &NoLiveLeases)
+            .converted
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_local_only_note_in_format_two_is_not_listed_while_new_notes_are_format_one() {
+    let (_scratch, _path, mut store) = open_store();
+    let base = dohc_engine_collab::ydoc::format_two_note_for_test(NOTE).encode_full_state();
+    on(|| local_note(&mut store, NOTE, &base, None));
+    let pass = on(|| {
+        convert_notes_to_format_two(
+            &mut store,
+            "ws",
+            None,
+            10,
+            &NoLiveLeases,
+            &NoLiveLeases,
+            &|_, _, _| Ok(None),
+            &NoFaults,
+            21,
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        (pass.converted.len(), pass.unchanged, pass.skipped),
+        (0, 1, vec![])
+    );
+}
+
+#[test]
 fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
     let (_scratch, _path, mut store) = open_store();
     let source = hex_sha256(NOTE.as_bytes());
@@ -1628,7 +1694,7 @@ fn a_pristine_local_seed_is_dropped_only_with_the_callers_file_proof() {
     let file_proof = |_: &EngineStore, proven: &DocKey, path: &str| {
         Ok((proven.object_id == "object-a" && path == "doc.md").then(|| source.clone()))
     };
-    let proven = on(|| {
+    let proven = with_new_notes(|| {
         convert_notes_to_format_two(
             &mut store,
             "ws",
@@ -1923,7 +1989,7 @@ fn a_storage_failure_reading_the_file_proof_stops_the_pass() {
             )),
         ))
     };
-    let stopped = on(|| {
+    let stopped = with_new_notes(|| {
         convert_notes_to_format_two(
             &mut store,
             "ws",

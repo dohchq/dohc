@@ -10,11 +10,12 @@ import {
   createNoteConversion,
   noteConversionOffered,
   noteConversionReach,
+  engineNoteBodySequence,
   stopsOnceSyncStarts,
   type NoteConversionRelay,
 } from "./noteConversion";
 
-type Params = { after?: string; budget: number; relayLive: string[] };
+type Params = { after?: string; budget: number; relayLive?: string[] };
 type Outcome = Record<string, unknown> | Error;
 
 function pass(overrides: Record<string, unknown> = {}) {
@@ -125,10 +126,19 @@ describe("note conversion run", () => {
       sent: true,
     });
     expect(convert.mock.calls.map(([params]) => params)).toEqual([
-      { budget: 1, relayLive: [] },
-      { after: "n1", budget: 1, relayLive: [] },
-      { after: "n2", budget: 1, relayLive: [] },
+      { budget: 1 },
+      { after: "n1", budget: 1 },
+      { after: "n2", budget: 1 },
     ]);
+  });
+
+  it("asks to turn sync back on when the engine refuses a folder that synced before", async () => {
+    const convert = oneNoteAtATime([new Error("note-format-two-relay-unchecked")]);
+    await expect(
+      createNoteConversion()("ws", { relay: null, convert, assertCurrent: () => undefined }),
+    ).rejects.toThrow(
+      "dohc could not convert notes because this folder synced before. Turn sync back on in Settings, then try again.",
+    );
   });
 
   it("converts one note per call, reads the live list once per batch, and keeps going past unreadable notes", async () => {
@@ -558,8 +568,14 @@ describe("who converts a workspace's notes", () => {
     );
   });
 
-  it("offers conversion only to the owner, and only while the engine reads and writes the new format", () => {
-    const on = { DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1", DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "1" };
+  it("reads the new format unless the setting turns it off", () => {
+    expect(engineNoteBodySequence({})).toBe("1");
+    expect(engineNoteBodySequence({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "0" })).toBe("0");
+    expect(engineNoteBodySequence({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "" })).toBe("");
+  });
+
+  it("offers conversion only to the owner, and only while the engine reads the new format", () => {
+    const on = { DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" };
     expect(noteConversionOffered(on, {}, null)).toBe(true);
     expect(noteConversionOffered(on, { remote }, owner)).toBe(true);
     expect(noteConversionOffered(on, { pausedRemote: remote }, owner)).toBe(true);
@@ -572,8 +588,9 @@ describe("who converts a workspace's notes", () => {
 
     expect(
       noteConversionOffered({ ...on, DOHC_ENGINE_NEW_NOTE_BODY_SEQUENCE: "0" }, {}, null),
-    ).toBe(false);
-    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "1" }, {}, null)).toBe(false);
-    expect(noteConversionOffered({}, {}, null)).toBe(false);
+    ).toBe(true);
+    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "0" }, {}, null)).toBe(false);
+    expect(noteConversionOffered({ DOHC_ENGINE_NOTE_BODY_SEQUENCE: "" }, {}, null)).toBe(false);
+    expect(noteConversionOffered({}, {}, null)).toBe(true);
   });
 });

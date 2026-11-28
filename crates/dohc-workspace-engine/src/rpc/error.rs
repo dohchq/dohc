@@ -254,8 +254,11 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     ) {
         return WireError::new(ErrorCode::Conflict, error.code());
     }
-    if matches!(error, RuntimeError::LinksEdgesSourceChanged) {
-        return WireError::new(ErrorCode::Conflict, "links-edges-source-changed");
+    if matches!(
+        error,
+        RuntimeError::LinksEdgesSourceChanged | RuntimeError::NoteConversionRelayUnchecked
+    ) {
+        return WireError::new(ErrorCode::Conflict, error.code());
     }
     if matches!(
         error,

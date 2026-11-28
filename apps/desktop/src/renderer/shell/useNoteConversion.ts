@@ -73,7 +73,7 @@ export function noteConversionNotice(result: ConvertNotesResult): {
   const groups = leftNoteGroups(result);
   return {
     title: finishedWords(0, left),
-    message: `${converted}${unsent} The rest stay as they were and can still be edited. Convert them once they close or finish syncing.`,
+    message: `${converted}${unsent} The rest stay as they were and can still be edited. Run Convert notes again for notes that were open or busy.`,
     tone: "warning",
     rows: groups.map(({ title, notes }) => {
       const shown = notes.slice(0, SHOWN_PER_GROUP).map(({ path }) => pathWords(path));
@@ -176,7 +176,9 @@ export function useNoteConversion(input: {
         ...notice,
         kind: KIND,
         retry: result.sent ? null : convert,
-        ...(result.sent && left > 0
+        ...(result.sent &&
+        (result.failed.length > 0 ||
+          result.skipped.some(({ reason }) => reason !== "local-new-notes-format-one"))
           ? { action: { label: "Convert remaining", run: convert, ends: true } }
           : {}),
       });

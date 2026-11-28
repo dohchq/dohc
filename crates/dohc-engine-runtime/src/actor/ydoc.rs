@@ -1413,7 +1413,7 @@ impl ActorHandle {
         root_dir: PathBuf,
         after: Option<String>,
         here: dohc_engine_collab::LeaseRegistry,
-        elsewhere: std::sync::Arc<HashSet<String>>,
+        elsewhere: Option<std::sync::Arc<HashSet<String>>>,
         now_ms: i64,
     ) -> Result<dohc_engine_sync::FormatTwoPass, RuntimeError> {
         self.run(move |store, cache| {
@@ -1424,7 +1424,7 @@ impl ActorHandle {
                 after.as_deref(),
                 1,
                 &here,
-                &elsewhere,
+                elsewhere.as_deref(),
                 &root_dir,
                 now_ms,
             )
@@ -4749,10 +4749,22 @@ pub(crate) fn convert_notes_on_store(
     after: Option<&str>,
     budget: usize,
     here: &dohc_engine_collab::LeaseRegistry,
-    elsewhere: &HashSet<String>,
+    elsewhere: Option<&HashSet<String>>,
     root_dir: &std::path::Path,
     now_ms: i64,
 ) -> Result<dohc_engine_sync::FormatTwoPass, RuntimeError> {
+    let unchecked = HashSet::new();
+    let elsewhere = match elsewhere {
+        Some(elsewhere) => elsewhere,
+        None => {
+            if store.read_with(|conn| {
+                dohc_engine_sync::workspace_replicates_with_relay(conn, workspace_id)
+            })? {
+                return Err(RuntimeError::NoteConversionRelayUnchecked);
+            }
+            &unchecked
+        }
+    };
     let pass = dohc_engine_sync::convert_notes_to_format_two(
         store,
         workspace_id,

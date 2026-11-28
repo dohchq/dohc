@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { RELAY_API_VERSION } from "@dohc/workspace-contracts/relay-values";
 import { createShareWebApplication, type CreateShareWebApplicationOptions } from "./server";
 
 const build = vi.hoisted(() => ({ compiled: 1, accepted: { min: 1, max: 1 } }));
@@ -442,6 +443,6 @@ it("never forwards a client's version header to the relay or auth service", asyn
   expect(authRequests).toHaveLength(1);
   for (const request of [...f.calls, ...authRequests])
     expect(request.headers.has(header)).toBe(false);
-  expect(f.calls[0]!.headers.get("x-dohc-api-version")).toBe("1");
+  expect(f.calls[0]!.headers.get("x-dohc-api-version")).toBe(String(RELAY_API_VERSION));
   expect(authRequests[0]!.headers.has("x-dohc-api-version")).toBe(false);
 });

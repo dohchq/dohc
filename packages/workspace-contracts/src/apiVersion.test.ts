@@ -1,11 +1,21 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   checkApiVersion,
+  RELAY_API_VERSION,
   RELAY_API_VERSION_HEADER,
   SHARE_WEB_API_VERSION_HEADER,
 } from "./relayValues";
 
 describe("API wire version parsing", () => {
+  it("names relay version 2, the same in the Rust relay client", () => {
+    const rust = readFileSync(
+      new URL("../../../crates/dohc-engine-sync-http/src/lib.rs", import.meta.url),
+      "utf8",
+    );
+    const named = /^const RELAY_API_VERSION: &str = "(\d+)";\r?$/m.exec(rust)?.[1];
+    expect([RELAY_API_VERSION, named]).toEqual([2, "2"]);
+  });
   it("keeps the relay and share-web counters separate", () => {
     expect(RELAY_API_VERSION_HEADER).not.toBe(SHARE_WEB_API_VERSION_HEADER);
   });

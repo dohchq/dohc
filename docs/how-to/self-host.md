@@ -704,6 +704,10 @@ Raise it to 2 and restart only once every desktop that uses the server is update
 An older desktop then stops syncing and asks its user to update dohc. Its changes stay on that computer.
 Phones and share pages keep working. `GET /ready` reports the setting as `engineApiMin`.
 
+Desktops that sync at version 2 can convert notes to a newer format, so the server must accept that format first.
+Before you raise the floor, set `DOHC_RELAY_BODY_SEQUENCE_NOTES=1` and `DOHC_ENGINE_NOTE_BODY_SEQUENCE=1` in `.env.self-host` and restart.
+Check that `docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T sync-relay env` prints both as 1, then raise the floor to 2.
+
 Save an encrypted relay snapshot online while the deployment keeps running:
 
 ```sh

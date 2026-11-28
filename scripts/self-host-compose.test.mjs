@@ -259,6 +259,12 @@ test("server automations default on and accept an explicit opt-out", () => {
   }
 });
 
+test("the relay and its engines take the new note format only when it is turned on", () => {
+  const relay = compose.services["sync-relay"].environment;
+  assert.equal(relay.DOHC_RELAY_BODY_SEQUENCE_NOTES, "${DOHC_RELAY_BODY_SEQUENCE_NOTES-0}");
+  assert.equal(relay.DOHC_ENGINE_NOTE_BODY_SEQUENCE, "${DOHC_ENGINE_NOTE_BODY_SEQUENCE-0}");
+});
+
 test("app publications use one opt-in setting", () => {
   assert.equal(settings().DOHC_RELAY_APP_PUBLICATIONS, "0");
   assert.equal(

@@ -128,6 +128,7 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
 
 export interface EngineDaemonLifecycleOptions {
   readerConfig?: string;
+  noteBodySequence?: string;
   privateOwnerHost?: {
     configPath: string;
     client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>;
@@ -915,6 +916,9 @@ export class EngineDaemonLifecycle {
             ? { DOHC_ENGINE_OWNER_HOST_CONFIG: this.options.privateOwnerHost.configPath }
             : {}),
           DOHC_ENGINE_READER_CONFIG: this.options.readerConfig,
+          ...(this.options.noteBodySequence === undefined
+            ? {}
+            : { DOHC_ENGINE_NOTE_BODY_SEQUENCE: this.options.noteBodySequence }),
         },
         command: this.options.command,
         cwd: dirname(this.options.command),

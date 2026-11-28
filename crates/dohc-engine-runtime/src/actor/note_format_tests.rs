@@ -94,7 +94,7 @@ fn converting_a_note_forgets_only_its_writer_cache_entry() {
                 None,
                 10,
                 &here,
-                &HashSet::new(),
+                Some(&HashSet::new()),
                 scratch.path(),
                 21,
             )
@@ -108,4 +108,46 @@ fn converting_a_note_forgets_only_its_writer_cache_entry() {
     );
     assert!(!cache.contains_for_test(&converted));
     assert!(cache.contains_for_test(&open));
+}
+
+#[test]
+fn a_replicating_workspace_without_a_relay_check_is_refused() {
+    let scratch = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&scratch.path().join("engine.db"), 0).unwrap();
+    let mut cache = WriterDocCache::new();
+    settled_local_note(&mut store, &mut cache, ("object-a", "a.md"), "A note.\n");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('ws','local','epoch','stream',1);
+                 INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('ws','local',0);",
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .unwrap();
+    let changes = |store: &EngineStore| {
+        store
+            .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
+            .unwrap()
+    };
+    let before = changes(&store);
+    let here = LeaseRegistry::new().scoped(scratch.path());
+    let pass = reading_body_sequence_here(|| {
+        convert_notes_on_store(
+            &mut store,
+            &mut cache,
+            "ws",
+            None,
+            10,
+            &here,
+            None,
+            scratch.path(),
+            21,
+        )
+    });
+    assert!(matches!(
+        pass,
+        Err(RuntimeError::NoteConversionRelayUnchecked)
+    ));
+    assert_eq!(changes(&store), before);
 }

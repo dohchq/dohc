@@ -15,7 +15,7 @@ use std::sync::Arc;
 struct Params {
     after: Option<String>,
     budget: usize,
-    relay_live: HashSet<String>,
+    relay_live: Option<HashSet<String>>,
 }
 
 impl EngineService {
@@ -47,7 +47,7 @@ impl EngineService {
         )
         .await?;
         let here = self.leases.scoped(&open.root);
-        let relay_live = Arc::new(params.relay_live);
+        let relay_live = params.relay_live.map(Arc::new);
         let mut after = params.after;
         let (mut off, mut converted, mut unchanged) = (false, 0, 0);
         let (mut skipped, mut does_not_fit, mut failed) = (Vec::new(), Vec::new(), Vec::new());
@@ -67,7 +67,7 @@ impl EngineService {
                     open.root.clone(),
                     after.clone(),
                     here.clone(),
-                    Arc::clone(&relay_live),
+                    relay_live.clone(),
                     now_ms()?,
                 ),
             )

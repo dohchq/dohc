@@ -24,6 +24,8 @@ pub enum RuntimeError {
     ChatConversationLinksChanged,
     #[error("links-edges-source-changed")]
     LinksEdgesSourceChanged,
+    #[error("note-format-two-relay-unchecked")]
+    NoteConversionRelayUnchecked,
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -180,6 +182,7 @@ impl RuntimeError {
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
             RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
+            RuntimeError::NoteConversionRelayUnchecked => "note-format-two-relay-unchecked",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",
